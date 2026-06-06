@@ -8,10 +8,8 @@ try:
 except ImportError:
     pd = None
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 if pd is not None:
-    from barcode_detection import write_barcodes_by_well
+    from mfsflow.scripts.barcode_detection import write_barcodes_by_well
 else:
     write_barcodes_by_well = None
 

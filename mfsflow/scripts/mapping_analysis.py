@@ -19,7 +19,10 @@ import itertools
 import gzip
 import sys
 
-from path_layout import barcode_dir
+try:
+    from mfsflow.scripts.path_layout import barcode_dir
+except ImportError:
+    from path_layout import barcode_dir
 
 def load_config(yaml_file):
     with open(yaml_file, 'r') as f:
@@ -72,7 +75,10 @@ def get_stream_corrected_read_length(bam_files, bc_bin_file, expect_id_file, tar
     """
     try:
         import pysam
-        from barcode_corrector import correct_read_barcode, load_bc_map, load_id_map
+        try:
+            from mfsflow.scripts.barcode_corrector import correct_read_barcode, load_bc_map, load_id_map
+        except ImportError:
+            from barcode_corrector import correct_read_barcode, load_bc_map, load_id_map
     except ImportError:
         return 0
 

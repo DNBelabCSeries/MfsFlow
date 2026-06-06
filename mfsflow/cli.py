@@ -36,30 +36,26 @@ def build_parser():
     return parser
 
 
-def generate_report(config):
+def generate_report(config, analysis_failed=False):
     """Generate the HTML report for the completed pipeline analysis.
     
     Args:
         config (dict): Pipeline configuration dictionary containing project
             settings and output directory paths.
     """
-    try:
-        from datetime import datetime
-        from pathlib import Path
+    from mfsflow.path_layout import logs_dir
+    from mfsflow.runtime import PipelineTimer
 
-        from mfsflow.path_layout import logs_dir
-        from mfsflow.runtime import PipelineTimer
+    from mfsflow import report
+    from mfsflow.runtime import log_info
 
-        from mfsflow import report
-        from mfsflow.runtime import log_info, log_error
-
-        log_info('Generating HTML Report...')
-        timing_path = os.path.join(logs_dir(config["out_dir"]), "pipeline_timing.tsv")
-        report_timer = PipelineTimer(timing_path, config["project"])
-        with report_timer.section("Report: HTML generation"):
-            report.generate_multi_report(config["project"], config["out_dir"], config)
-    except Exception as exc:
-        log_error(f"Error generating HTML report: {exc}")
+    log_info('Generating HTML Report...')
+    report_config = dict(config)
+    report_config["_analysis_failed"] = bool(analysis_failed)
+    timing_path = os.path.join(logs_dir(config["out_dir"]), "pipeline_timing.tsv")
+    report_timer = PipelineTimer(timing_path, config["project"])
+    with report_timer.section("Report: HTML generation"):
+        return report.generate_multi_report(config["project"], config["out_dir"], report_config)
 
 
 def main(argv=None):
@@ -73,8 +69,11 @@ def main(argv=None):
     """
     args = build_parser().parse_args(argv)
 
+    from mfsflow.preflight import check_python_dependencies
+
+    check_python_dependencies()
+
     import time
-    from datetime import datetime
     from pathlib import Path
 
     from mfsflow.pipeline_config import build_base_config, resolve_samplesheet_barcodes
@@ -112,12 +111,25 @@ def main(argv=None):
     log_info('Starting Pipeline...')
 
     pipeline_start = time.perf_counter()
-    run_pipeline_stages(final_yaml_path)
-    pipeline_duration = time.perf_counter() - pipeline_start
+    try:
+        run_pipeline_stages(final_yaml_path)
+    except Exception:
+        from mfsflow.runtime import log_error
 
-    log_info(f'All analysis finished (Duration: {format_duration(pipeline_duration)}).')
-
-    generate_report(config)
+        pipeline_duration = time.perf_counter() - pipeline_start
+        log_error(
+            f'Analysis failed after {format_duration(pipeline_duration)}. '
+            'Attempting to generate a partial report from completed outputs.'
+        )
+        try:
+            generate_report(config, analysis_failed=True)
+        except Exception as report_exc:
+            log_error(f"Partial report generation also failed: {report_exc}")
+        raise
+    else:
+        pipeline_duration = time.perf_counter() - pipeline_start
+        log_info(f'All analysis finished (Duration: {format_duration(pipeline_duration)}).')
+        generate_report(config)
 
 
 if __name__ == "__main__":

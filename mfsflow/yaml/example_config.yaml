@@ -74,6 +74,13 @@ counting_opts:
   gene_body_max_reads: 5000000 #Target number of primary mapped reads sampled for gene body coverage per read source. 0 disables downsampling.
   gene_body_sample_seed: 42 #Stable hash seed for unbiased gene body coverage sampling.
 
+#Runtime resource and temporary-file options
+performance_opts:
+  stream_bc_correction: yes
+  tmp_root: ~
+  min_free_gb: 5
+  disk_space_multiplier: 4.0
+
 #produce stats files and plots?
 make_stats: yes
 

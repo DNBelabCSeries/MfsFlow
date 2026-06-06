@@ -13,7 +13,10 @@ try:
 except ImportError:
     pysam = None
 
-from barcode_corrector import BarcodeCorrection, correct_read_barcode, load_bc_map, load_id_map
+try:
+    from mfsflow.scripts.barcode_corrector import BarcodeCorrection, correct_read_barcode, load_bc_map, load_id_map
+except ImportError:
+    from barcode_corrector import BarcodeCorrection, correct_read_barcode, load_bc_map, load_id_map
 
 
 def get_or_apply_correction(read, bc_map, id_map, internal_bcs):

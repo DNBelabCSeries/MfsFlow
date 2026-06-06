@@ -471,6 +471,14 @@ ${plotly_loader_tag}
     .plot:hover {
         box-shadow: 0 4px 12px rgba(0,0,0,0.05);
     }
+    .analysis-warning {
+        margin: 16px 0;
+        padding: 14px 16px;
+        border: 1px solid #f59e0b;
+        border-radius: 10px;
+        background: var(--warning-bg);
+        color: var(--text);
+    }
     .compact-plot { height: 320px; min-height: 290px; margin-top: 12px; }
     .curve-plot { height: 400px; min-height: 370px; }
     .empty { 
@@ -819,6 +827,8 @@ ${plotly_loader_tag}
             <div class="badge">MfsFlow v${version}</div>
         </div>
     </section>
+
+    ${analysis_status_html}
 
     <section class="grid cards" id="summary-cards"></section>
 

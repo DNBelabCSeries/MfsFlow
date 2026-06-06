@@ -3,9 +3,7 @@ import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from h5ad_export import export_h5ad
+from mfsflow.scripts.h5ad_export import export_h5ad
 
 
 class H5adExportTests(unittest.TestCase):

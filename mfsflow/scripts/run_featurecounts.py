@@ -19,7 +19,10 @@ import gzip
 import glob
 import hashlib
 
-from path_layout import expression_dir, stats_dir
+try:
+    from mfsflow.scripts.path_layout import expression_dir, stats_dir
+except ImportError:
+    from path_layout import expression_dir, stats_dir
 
 def load_config(yaml_file):
     with open(yaml_file, 'r') as f:

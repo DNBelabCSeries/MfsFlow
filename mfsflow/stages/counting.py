@@ -44,14 +44,16 @@ def run_counting_stage(runtime, run_stage_cmd):
     ]
     run_stage_cmd(featurecounts_cmd, "FeatureCounts (Python)")
 
+    log_info("Starting DGE Analysis (Python)")
+    dge_cmd = [python_exec, resolve_script("dge_analysis.py"), yaml_file, samtools]
+    run_stage_cmd(dge_cmd, "dge_analysis.py")
+
+    # Keep the aligned BAMs until all counting work succeeds so a failed DGE
+    # step can be resumed from Counting without rerunning Mapping.
     remove_path(umi_aligned)
     remove_path(int_aligned)
     remove_path(umi_to_tx)
     remove_path(int_to_tx)
-
-    log_info("Starting DGE Analysis (Python)")
-    dge_cmd = [python_exec, resolve_script("dge_analysis.py"), yaml_file, samtools]
-    run_stage_cmd(dge_cmd, "dge_analysis.py")
 
     gene_tagged_bam = os.path.join(analysis_dir, f"{project}.filtered.Aligned.GeneTagged.bam")
     stats_enabled = str(config.get("make_stats", "yes")).lower() in ["yes", "true"]

@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from mfsflow.report import (
+    generate_multi_report,
     _process_sequencing_quality_data,
     _infer_transcriptome_label,
     export_deliverables_to_outs,
@@ -14,6 +15,42 @@ from mfsflow.report import (
 
 
 class ReportMetadataTests(unittest.TestCase):
+    def test_empty_partial_report_is_written_atomically(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            outdir.mkdir()
+            report_path = generate_multi_report(
+                "sample",
+                str(outdir),
+                {
+                    "project": "sample",
+                    "out_dir": str(outdir),
+                    "sample": {"sample_type": "manual"},
+                    "reference": {},
+                },
+            )
+
+            self.assertTrue(report_path.exists())
+            self.assertFalse(report_path.with_suffix(report_path.suffix + ".tmp").exists())
+
+    def test_failed_analysis_report_has_incomplete_warning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            outdir.mkdir()
+            report_path = generate_multi_report(
+                "sample",
+                str(outdir),
+                {
+                    "project": "sample",
+                    "out_dir": str(outdir),
+                    "sample": {"sample_type": "manual"},
+                    "reference": {},
+                    "_analysis_failed": True,
+                },
+            )
+
+            self.assertIn("Incomplete analysis:", report_path.read_text())
+
     def test_transcriptome_label_uses_parent_for_star_index_dir(self):
         label = _infer_transcriptome_label({"STAR_index": "/path/to/reference/star"})
         self.assertEqual(label, "reference")

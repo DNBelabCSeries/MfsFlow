@@ -19,7 +19,7 @@ cd MfsFlow
 pip install -r requirements.txt
 
 # 3. Install MfsFlow
-pip install -e .
+pip install .
 
 # 4. Verify
 mfsflow --help

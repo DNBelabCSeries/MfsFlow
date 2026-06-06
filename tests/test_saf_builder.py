@@ -3,9 +3,7 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from run_featurecounts import _best_intron_assignment, load_saf_interval_index, parse_gtf_and_create_saf
+from mfsflow.scripts.run_featurecounts import _best_intron_assignment, load_saf_interval_index, parse_gtf_and_create_saf
 
 
 class SafBuilderTests(unittest.TestCase):

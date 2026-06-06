@@ -6,7 +6,7 @@ import unittest
 from mfsflow.cli import build_parser
 from mfsflow.runtime import PipelineRuntime, format_duration
 from mfsflow.stages import COUNTING, FILTERING, MAPPING, STAGE_ORDER, SUMMARISING
-from src.report import _select_report_template
+from mfsflow.report import _select_report_template
 
 
 class MfsflowPackageTests(unittest.TestCase):

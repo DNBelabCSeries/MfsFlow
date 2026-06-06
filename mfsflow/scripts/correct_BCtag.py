@@ -14,7 +14,10 @@ except ImportError:
     sys.stderr.write("Error: pysam module is required for this script. Please install it (pip install pysam).\n")
     sys.exit(1)
 
-from barcode_corrector import correct_read_barcode, load_bc_map, load_id_map
+try:
+    from mfsflow.scripts.barcode_corrector import correct_read_barcode, load_bc_map, load_id_map
+except ImportError:
+    from barcode_corrector import correct_read_barcode, load_bc_map, load_id_map
 
 def main():
     if len(sys.argv) < 6:

@@ -3,9 +3,7 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from run_featurecounts import (
+from mfsflow.scripts.run_featurecounts import (
     _project_blocks_to_gene_body,
     _pysam_blocks_1based_half_open,
     coverage_sampling_fraction,

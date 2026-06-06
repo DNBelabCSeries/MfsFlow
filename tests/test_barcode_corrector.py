@@ -3,9 +3,7 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from barcode_corrector import correct_read_barcode, load_bc_map, load_id_map
+from mfsflow.scripts.barcode_corrector import correct_read_barcode, load_bc_map, load_id_map
 
 
 class FakeRead:

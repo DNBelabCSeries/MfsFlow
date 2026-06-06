@@ -13,6 +13,7 @@ import gzip
 import logging
 import shutil
 import base64
+import os
 from pathlib import Path
 from string import Template
 import re
@@ -1251,8 +1252,7 @@ def generate_multi_report(name, outdir, config):
     template_path, report_mode = _select_report_template(sample_type, sample_outdir, template_dir, config)
     
     if not template_path.exists():
-        logger.error(f"Template not found at {template_path}")
-        return
+        raise FileNotFoundError(f"Report template not found: {template_path}")
     logger.info(f"Using report template: {template_path.name} (mode={report_mode}, configured={sample_type or 'unknown'})")
 
     with open(template_path, 'r', encoding='utf-8') as f:
@@ -1273,6 +1273,13 @@ def generate_multi_report(name, outdir, config):
     combined_context["vdj_b_target_enabled"] = "false"
     combined_context["fastq_display_html"] = ""
     combined_context["logo_data_uri"] = _load_logo_data_uri(template_dir)
+    combined_context["analysis_status_html"] = (
+        '<section class="analysis-warning"><strong>Incomplete analysis:</strong> '
+        'the pipeline failed before all stages finished. This partial report only '
+        'contains outputs completed before the failure. Check logs/pipeline.log.</section>'
+        if config.get("_analysis_failed")
+        else ""
+    )
 
     # Add input CSV and config parameters
     combined_context['input_csv_data'] = config.get('csv_content', '')
@@ -1312,7 +1319,7 @@ def generate_multi_report(name, outdir, config):
 
     try:
         report_html = template.safe_substitute(combined_context)
-        
+
         sample_type = combined_context.get("sample_type") or "analysis"
         if sample_type == "auto":
             report_suffix = "auto_plate_report"
@@ -1323,13 +1330,20 @@ def generate_multi_report(name, outdir, config):
         else:
             report_suffix = "analysis_report"
         out_file = outs_dir / f'{name}_{report_suffix}.html'
-        with open(out_file, 'w', encoding='utf-8') as f:
-            f.write(report_html)
-        
+        tmp_file = out_file.with_suffix(out_file.suffix + ".tmp")
+        try:
+            with open(tmp_file, 'w', encoding='utf-8') as f:
+                f.write(report_html)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_file, out_file)
+        finally:
+            if tmp_file.exists():
+                tmp_file.unlink()
+
         logger.info(f"HTML report saved to: {out_file}")
         logger.info("HTML report generation complete.")
-    except Exception as e:
-        logger.error(f"Error substituting template: {e}")
+        return out_file
     finally:
         try:
             export_deliverables_to_outs(sample_outdir, outs_dir, name)

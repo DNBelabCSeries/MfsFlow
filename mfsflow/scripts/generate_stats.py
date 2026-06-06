@@ -15,7 +15,10 @@ import gzip
 import json
 import numpy as np
 
-from path_layout import config_dir, expression_dir, stats_dir
+try:
+    from mfsflow.scripts.path_layout import config_dir, expression_dir, stats_dir
+except ImportError:
+    from path_layout import config_dir, expression_dir, stats_dir
 
 try:
     import matplotlib
@@ -100,6 +103,17 @@ def calculate_matrix_stats(matrix_dir):
 
 def plot_coverage(cov_umi, cov_int, out_prefix):
     if not HAS_MATPLOTLIB: return
+
+    def normalize_coverage(values):
+        values = np.asarray(values, dtype=np.float64).reshape(-1)
+        if values.size == 100:
+            return values
+        normalized = np.zeros(100, dtype=np.float64)
+        normalized[:min(values.size, 100)] = values[:100]
+        return normalized
+
+    cov_umi = normalize_coverage(cov_umi)
+    cov_int = normalize_coverage(cov_int)
     
     def smooth(y, window=7):
         y = np.asarray(y, dtype=np.float64)

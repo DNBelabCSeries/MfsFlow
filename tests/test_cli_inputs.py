@@ -4,9 +4,7 @@ import gzip
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from pipeline_config import configure_reference, discover_fastq_pairs, load_samplesheet, resolve_samplesheet_barcodes
+from mfsflow.pipeline_config import configure_reference, discover_fastq_pairs, load_samplesheet, resolve_samplesheet_barcodes
 
 
 class CliInputTests(unittest.TestCase):

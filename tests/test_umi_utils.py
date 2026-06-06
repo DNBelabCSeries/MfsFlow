@@ -2,9 +2,7 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from umi_utils import cluster_umis
+from mfsflow.scripts.umi_utils import cluster_umis
 
 
 class UmiUtilsTests(unittest.TestCase):

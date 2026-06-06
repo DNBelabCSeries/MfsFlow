@@ -2,9 +2,7 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from stream_corrector import get_or_apply_correction
+from mfsflow.scripts.stream_corrector import get_or_apply_correction
 
 
 class FakeRead:

@@ -2,9 +2,7 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from fqfilter import extract_seq, hamming_distance
+from mfsflow.scripts.fqfilter import extract_seq, hamming_distance
 
 
 class FqfilterLogicTests(unittest.TestCase):

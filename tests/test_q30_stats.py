@@ -3,9 +3,7 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from pipeline_modules import merge_q30_stats
+from mfsflow.pipeline_modules import merge_q30_stats
 
 
 class Q30StatsTests(unittest.TestCase):

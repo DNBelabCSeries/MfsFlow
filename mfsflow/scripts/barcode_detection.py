@@ -17,7 +17,10 @@ import re
 import collections
 import multiprocessing as mp
 
-from path_layout import barcode_dir
+try:
+    from mfsflow.scripts.path_layout import barcode_dir
+except ImportError:
+    from path_layout import barcode_dir
 
 # Suppress pandas chained assignment warnings
 pd.options.mode.chained_assignment = None 

@@ -10,7 +10,10 @@ import gzip
 import json
 import os
 
-from path_layout import expression_dir
+try:
+    from mfsflow.scripts.path_layout import expression_dir
+except ImportError:
+    from path_layout import expression_dir
 
 
 MATRIX_TYPES = (

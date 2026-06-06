@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from barcode_discovery import discover_barcodes, write_expected_tables
+from mfsflow.barcode_discovery import discover_barcodes, write_expected_tables
 
 
 class BarcodeDiscoveryTests(unittest.TestCase):

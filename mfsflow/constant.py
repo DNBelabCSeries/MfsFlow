@@ -60,7 +60,9 @@ DEFAULT_CONFIG = {
     },
     "performance_opts": {
         "stream_bc_correction": True,
-        "tmp_root": None
+        "tmp_root": None,
+        "min_free_gb": 5,
+        "disk_space_multiplier": 4.0
     },
     "make_stats": True,
     "make_h5ad": True,

@@ -17,6 +17,10 @@ def logs_dir(out_dir):
     return os.path.join(out_dir, "logs")
 
 
+def stage_state_dir(out_dir):
+    return os.path.join(logs_dir(out_dir), "stages")
+
+
 def barcode_dir(out_dir):
     return os.path.join(out_dir, "barcodes")
 
@@ -46,6 +50,7 @@ def ensure_layout(out_dir):
         out_dir,
         config_dir(out_dir),
         logs_dir(out_dir),
+        stage_state_dir(out_dir),
         barcode_dir(out_dir),
         expression_dir(out_dir),
         stats_dir(out_dir),

@@ -318,6 +318,8 @@ counting_opts:
 |-----------|------|---------|-------------|
 | `performance_opts.stream_bc_correction` | bool | true | Enable streaming barcode correction |
 | `performance_opts.tmp_root` | string | null | Temporary root directory (e.g., `/dev/shm`) |
+| `performance_opts.min_free_gb` | number | 5 | Minimum free disk space required before execution |
+| `performance_opts.disk_space_multiplier` | number | 4.0 | Estimated workspace requirement relative to FASTQ size |
 | `num_threads` | int | 30 | Number of threads to use |
 
 ### Command-Line Equivalent
@@ -361,6 +363,30 @@ This will store temporary files in memory, significantly reducing I/O latency.
 | `make_sorted_bam` | bool | true | Generate sorted BAM file |
 | `make_ub_bam` | bool | false | Generate UB-corrected BAM file |
 | `which_Stage` | string | "Filtering" | Start from this stage |
+
+### Runtime Preflight and Stage State
+
+Before execution, MfsFlow validates required Python packages, external tools,
+available disk space, GTF readability, STAR index completeness, and artifacts
+required by the selected resume stage.
+
+Disk checks can be tuned in `performance_opts`:
+
+```yaml
+performance_opts:
+  min_free_gb: 5
+  disk_space_multiplier: 4.0
+```
+
+Each successful stage writes an artifact manifest and success marker under:
+
+```text
+XPRESS_PROCESSING/logs/stages/<Stage>.manifest.json
+XPRESS_PROCESSING/logs/stages/<Stage>.success
+```
+
+Starting from `Mapping`, `Counting`, or `Summarising` fails early when required
+upstream artifacts are missing or empty.
 
 ### Command-Line Equivalent
 - `--outdir /path/to/output` → `out_dir: /path/to/output`

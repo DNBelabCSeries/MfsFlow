@@ -4,10 +4,8 @@ import gzip
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from mapping_analysis import build_star_misc_base, setup_gtf
-from run_featurecounts import build_featurecounts_cmd, normalize_read_category, resolve_counting_strand_modes, should_count_read
+from mfsflow.scripts.mapping_analysis import build_star_misc_base, setup_gtf
+from mfsflow.scripts.run_featurecounts import build_featurecounts_cmd, normalize_read_category, resolve_counting_strand_modes, should_count_read
 
 
 class MappingAndCountingLogicTests(unittest.TestCase):

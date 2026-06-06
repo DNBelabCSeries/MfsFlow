@@ -12,7 +12,10 @@ import subprocess
 import re
 import os
 
-from path_layout import tmp_merge_dir
+try:
+    from mfsflow.scripts.path_layout import tmp_merge_dir
+except ImportError:
+    from path_layout import tmp_merge_dir
 
 Q30_ASCII = 63
 Q30_TABLE = bytes(1 if i >= Q30_ASCII else 0 for i in range(256))

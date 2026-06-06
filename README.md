@@ -63,7 +63,7 @@ pip install -r requirements.txt
 
 ### 3. Install in Development Mode (Optional)
 ```bash
-pip install -e .
+pip install .
 ```
 
 This will install the `mfsflow` command-line tool.
@@ -177,6 +177,11 @@ output_directory/
 MfsFlow supports resuming interrupted runs from intermediate stages. After a run
 finishes and reports are generated, final deliverables are moved into `outs/`;
 use `outs/` as the completed result directory.
+
+Before each run, MfsFlow checks Python dependencies, required external tools,
+disk space, reference integrity, and resume-stage inputs. Successful stages
+write artifact manifests and `.success` markers under
+`XPRESS_PROCESSING/logs/stages/`.
 
 ## 🔧 Advanced Usage
 

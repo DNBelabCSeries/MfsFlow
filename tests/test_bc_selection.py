@@ -4,7 +4,7 @@ import unittest
 
 try:
     import pandas as pd
-    from barcode_detection import cell_bc_selection
+    from mfsflow.scripts.barcode_detection import cell_bc_selection
 except ImportError:
     pd = None
     cell_bc_selection = None
