@@ -3,10 +3,11 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from mfsflow.path_layout import stage_state_dir
-from mfsflow.stage_state import invalidate_stage_success, record_stage_success
-from mfsflow.stages import MAPPING
+from mfsflow.stage_state import _quickcheck_bams, invalidate_stage_success, record_stage_success
+from mfsflow.stages import FILTERING, MAPPING
 
 
 class StageStateTests(unittest.TestCase):
@@ -17,6 +18,31 @@ class StageStateTests(unittest.TestCase):
             tmp_merge_path=os.path.join(outdir, "intermediate", "tmp_merge"),
             config={"make_stats": True},
         )
+
+    def test_filtering_quickcheck_allows_unmapped_header(self):
+        runtime = SimpleNamespace(tools=SimpleNamespace(samtools="/tools/samtools"))
+        completed = SimpleNamespace(returncode=0, stdout="")
+        with mock.patch("mfsflow.stage_state.os.path.isfile", return_value=True), \
+             mock.patch("mfsflow.stage_state.os.access", return_value=True), \
+             mock.patch("mfsflow.stage_state.subprocess.run", return_value=completed) as run:
+            _quickcheck_bams(runtime, ["/tmp/raw.tagged.bam"], unmapped=True)
+
+        self.assertEqual(
+            run.call_args.args[0],
+            ["/tools/samtools", "quickcheck", "-v", "-u", "/tmp/raw.tagged.bam"],
+        )
+
+    def test_filtering_manifest_uses_unmapped_quickcheck_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            os.makedirs(runtime.tmp_merge_path)
+            bam = os.path.join(runtime.tmp_merge_path, "sample.part_001.raw.tagged.bam")
+            with open(bam, "wb") as handle:
+                handle.write(b"BAM")
+            with mock.patch("mfsflow.stage_state._quickcheck_bams") as quickcheck:
+                record_stage_success(runtime, FILTERING)
+
+            self.assertTrue(quickcheck.call_args.kwargs["unmapped"])
 
     def test_mapping_success_writes_manifest_and_marker(self):
         with tempfile.TemporaryDirectory() as tmpdir:

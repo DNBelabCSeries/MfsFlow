@@ -35,14 +35,22 @@ def _validate_gzip(path, label):
         raise RuntimeError(f"{label} is corrupt or unreadable: {path}: {exc}") from exc
 
 
-def _quickcheck_bams(runtime, paths):
+def _quickcheck_bams(runtime, paths, unmapped=False):
+    """Validate BAM structure, allowing header-only targets for unmapped BAMs."""
+    paths = list(paths)
+    if not paths:
+        return
     samtools = getattr(getattr(runtime, "tools", None), "samtools", None)
     if not samtools:
         return
     if not ((os.path.isfile(str(samtools)) and os.access(str(samtools), os.X_OK)) or shutil.which(str(samtools))):
         return
+    command = [str(samtools), "quickcheck", "-v"]
+    if unmapped:
+        command.append("-u")
+    command.extend(paths)
     result = subprocess.run(
-        [str(samtools), "quickcheck", "-v", *paths],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -109,7 +117,7 @@ def _validate_stage_outputs(runtime, stage, artifacts):
         )
         if not has_mapping_input:
             raise RuntimeError("Filtering completed but no non-empty Mapping input BAM chunks were found.")
-        _quickcheck_bams(runtime, [path for path in artifacts if path.endswith(".bam")])
+        _quickcheck_bams(runtime, [path for path in artifacts if path.endswith(".bam")], unmapped=True)
     elif stage == MAPPING:
         umi_bam = os.path.join(out_dir, f"{project}.filtered.tagged.umi.Aligned.out.bam")
         if not _nonempty_file(umi_bam):
@@ -184,7 +192,7 @@ def validate_resume_inputs(runtime):
                 "Cannot resume from Mapping: no non-empty Filtering BAM artifacts were found. "
                 "Resume from Filtering or restore the Filtering outputs."
             )
-        _quickcheck_bams(runtime, candidates)
+        _quickcheck_bams(runtime, candidates, unmapped=True)
     elif stage == COUNTING:
         required = os.path.join(out_dir, f"{project}.filtered.tagged.umi.Aligned.out.bam")
         if not _nonempty_file(required):
