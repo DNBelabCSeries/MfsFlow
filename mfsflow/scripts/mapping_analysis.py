@@ -20,13 +20,9 @@ import gzip
 import sys
 
 try:
-    from mfsflow.scripts.path_layout import barcode_dir
+    from mfsflow.scripts.path_layout import barcode_dir, load_config
 except ImportError:
-    from path_layout import barcode_dir
-
-def load_config(yaml_file):
-    with open(yaml_file, 'r') as f:
-        return yaml.safe_load(f)
+    from path_layout import barcode_dir, load_config
 
 def run_cmd(cmd, shell=True):
     print(f"Running: {cmd}")

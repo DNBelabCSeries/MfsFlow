@@ -285,7 +285,7 @@ If `barcode_num` is null and `automatic` is false, the pipeline will:
 | `counting_opts.internal_strand` | int | 0 | Strand specificity for internal reads (override) |
 | `counting_opts.Ham_Dist` | int | 1 | Hamming distance for UMI collapsing |
 | `counting_opts.twoPass` | bool | false | Perform STAR two-pass mapping |
-| `counting_opts.gene_body_max_reads` | int | 5000000 | Target primary mapped reads for gene body coverage per read source. Reads are selected by stable hash sampling across the whole BAM, so coordinate-sorted BAMs are not biased toward early genomic regions. Use 0 to include all reads. |
+| `counting_opts.gene_body_max_reads` | int | 10000000 | Target primary mapped reads for gene body coverage per read source. Reads are selected by stable hash sampling across the whole BAM, so coordinate-sorted BAMs are not biased toward early genomic regions. Use 0 to include all reads. |
 | `counting_opts.gene_body_sample_seed` | int | 42 | Seed for deterministic gene body coverage sampling |
 
 ### Example

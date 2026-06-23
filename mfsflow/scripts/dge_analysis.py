@@ -21,7 +21,6 @@ import numpy as np
 import pandas as pd
 import multiprocessing
 import json
-import shutil
 
 try:
     import pysam
@@ -32,15 +31,11 @@ except ImportError:
 try:
     from mfsflow.scripts.umi_utils import cluster_umis
     from mfsflow.scripts.h5ad_export import export_h5ad
-    from mfsflow.scripts.path_layout import barcode_dir, expression_dir, stats_dir
+    from mfsflow.scripts.path_layout import barcode_dir, expression_dir, stats_dir, load_config
 except ImportError:
     from umi_utils import cluster_umis
     from h5ad_export import export_h5ad
-    from path_layout import barcode_dir, expression_dir, stats_dir
-
-def load_config(yaml_file):
-    with open(yaml_file, 'r') as f:
-        return yaml.safe_load(f)
+    from path_layout import barcode_dir, expression_dir, stats_dir, load_config
 
 def process_barcode_worker(args):
     """

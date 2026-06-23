@@ -13,16 +13,15 @@ import re
 import os
 
 try:
-    from mfsflow.scripts.path_layout import tmp_merge_dir
+    from mfsflow.scripts.path_layout import tmp_merge_dir, load_config
 except ImportError:
-    from path_layout import tmp_merge_dir
+    from path_layout import tmp_merge_dir, load_config
 
 Q30_ASCII = 63
 Q30_TABLE = bytes(1 if i >= Q30_ASCII else 0 for i in range(256))
 
-def get_config(yaml_file):
-    with open(yaml_file, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
+# Alias for backward compatibility
+get_config = load_config
 
 def parse_definition(definition):
     if isinstance(definition, list):

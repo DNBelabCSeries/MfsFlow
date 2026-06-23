@@ -39,51 +39,46 @@ def main():
         id_map, internal_bcs = load_id_map(id_map_file)
         print(f"Loaded {len(id_map)} ID mappings and {len(internal_bcs)} internal barcodes.")
 
-    # Open BAM files
-    infile = pysam.AlignmentFile(in_bam, "rb", check_sq=False)
+    # Open BAM files using context managers for proper resource cleanup
+    with pysam.AlignmentFile(in_bam, "rb", check_sq=False) as infile:
+        # Prepare header
+        header = infile.header.to_dict()
+        pg_entry = {
+            'ID': 'MfsFlow-correct_BCtag',
+            'PN': 'MfsFlow-correct_BCtag',
+            'VN': '3.0-pysam-mgi-custom',
+            'CL': 'python3 ' + ' '.join(sys.argv)
+        }
+        if 'PG' in header:
+            header['PG'].append(pg_entry)
+        else:
+            header['PG'] = [pg_entry]
 
-    # Prepare header
-    header = infile.header.to_dict()
-    pg_entry = {
-        'ID': 'MfsFlow-correct_BCtag',
-        'PN': 'MfsFlow-correct_BCtag',
-        'VN': '3.0-pysam-mgi-custom',
-        'CL': 'python3 ' + ' '.join(sys.argv)
-    }
-    if 'PG' in header:
-        header['PG'].append(pg_entry)
-    else:
-        header['PG'] = [pg_entry]
-        
-    outfile_umi = pysam.AlignmentFile(out_bam_umi, "wb", header=header)
-    outfile_int = pysam.AlignmentFile(out_bam_internal, "wb", header=header)
+        with pysam.AlignmentFile(out_bam_umi, "wb", header=header) as outfile_umi, \
+             pysam.AlignmentFile(out_bam_internal, "wb", header=header) as outfile_int:
 
-    processed = 0
-    
-    for read in infile:
-        processed += 1
-        if processed % 1000000 == 0:
-            print(f"Processed {processed} reads...", flush=True)
+            processed = 0
 
-        try:
-            correction = correct_read_barcode(read, bc_map, id_map, internal_bcs)
-            if correction is None:
-                outfile_umi.write(read)
-                continue
+            for read in infile:
+                processed += 1
+                if processed % 1000000 == 0:
+                    print(f"Processed {processed} reads...", flush=True)
 
-            if correction.is_internal:
-                outfile_int.write(read)
-            else:
-                outfile_umi.write(read)
+                try:
+                    correction = correct_read_barcode(read, bc_map, id_map, internal_bcs)
+                    if correction is None:
+                        outfile_umi.write(read)
+                        continue
 
-        except Exception as e:
-            # sys.stderr.write(f"Warning: error processing read {read.query_name}: {e}\n")
-            # Write error reads to UMI as safe fallback
-            outfile_umi.write(read)
-            
-    infile.close()
-    outfile_umi.close()
-    outfile_int.close()
+                    if correction.is_internal:
+                        outfile_int.write(read)
+                    else:
+                        outfile_umi.write(read)
+
+                except Exception as e:
+                    # sys.stderr.write(f"Warning: error processing read {read.query_name}: {e}\n")
+                    # Write error reads to UMI as safe fallback
+                    outfile_umi.write(read)
 
 if __name__ == "__main__":
     main()

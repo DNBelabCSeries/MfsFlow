@@ -18,17 +18,12 @@ import collections
 import multiprocessing as mp
 
 try:
-    from mfsflow.scripts.path_layout import barcode_dir
+    from mfsflow.scripts.path_layout import barcode_dir, load_config
 except ImportError:
-    from path_layout import barcode_dir
+    from path_layout import barcode_dir, load_config
 
 # Suppress pandas chained assignment warnings
-pd.options.mode.chained_assignment = None 
-
-def load_config(yaml_file):
-    """Load YAML configuration."""
-    with open(yaml_file, 'r') as f:
-        return yaml.safe_load(f)
+pd.options.mode.chained_assignment = None
 
 def read_whitelist(bcfile):
     """

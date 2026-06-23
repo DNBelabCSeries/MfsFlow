@@ -16,9 +16,9 @@ import json
 import numpy as np
 
 try:
-    from mfsflow.scripts.path_layout import config_dir, expression_dir, stats_dir
+    from mfsflow.scripts.path_layout import config_dir, expression_dir, stats_dir, load_config
 except ImportError:
-    from path_layout import config_dir, expression_dir, stats_dir
+    from path_layout import config_dir, expression_dir, stats_dir, load_config
 
 try:
     import matplotlib
@@ -27,10 +27,6 @@ try:
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
-
-def load_config(yaml_file):
-    with open(yaml_file, 'r') as f:
-        return yaml.safe_load(f)
 
 def load_barcode_mapping(out_dir, _project):
     mapping = {}
@@ -188,14 +184,16 @@ def plot_gene_umi_counts_by_type(stats_exon, stats_intron, stats_inex, wells, ou
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 5))
     
-    bp0 = axes[0].boxplot(gene_data, labels=types, notch=True, patch_artist=True)
+    bp0 = axes[0].boxplot(gene_data, notch=True, patch_artist=True)
+    axes[0].set_xticklabels(types)
     for patch, color in zip(bp0['boxes'], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.8)
     axes[0].set_title("Number of Genes")
     axes[0].set_ylabel("Count")
     
-    bp1 = axes[1].boxplot(umi_data, labels=types, notch=True, patch_artist=True)
+    bp1 = axes[1].boxplot(umi_data, notch=True, patch_artist=True)
+    axes[1].set_xticklabels(types)
     for patch, color in zip(bp1['boxes'], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.8)
@@ -496,7 +494,8 @@ def plot_features(read_stats, wells, out_pdf):
     else:
         plot_labels = [c for c, _vals in box_pairs]
         box_data = [_vals for _c, _vals in box_pairs]
-        bp = axes[1].boxplot(box_data, labels=plot_labels, notch=True, patch_artist=True)
+        bp = axes[1].boxplot(box_data, notch=True, patch_artist=True)
+        axes[1].set_xticklabels(plot_labels)
         for patch, c in zip(bp["boxes"], plot_labels):
             patch.set_facecolor(feat_colors[c])
 

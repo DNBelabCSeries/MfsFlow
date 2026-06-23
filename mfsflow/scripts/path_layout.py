@@ -7,6 +7,7 @@ functions used throughout the pipeline.
 """
 
 import os
+import yaml
 
 
 def config_dir(out_dir):
@@ -59,3 +60,9 @@ def ensure_layout(out_dir):
         outputs_dir(out_dir),
     ):
         os.makedirs(path, exist_ok=True)
+
+
+def load_config(yaml_file):
+    """Load configuration from YAML file."""
+    with open(yaml_file, 'r') as f:
+        return yaml.safe_load(f)

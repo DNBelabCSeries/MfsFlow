@@ -87,7 +87,6 @@ python3 run_analysis_pipeline.py \
   --fastqs /path/to/fastq_dir \
   --genomeDir /path/to/reference \
   --sample SAMPLE_NAME \
-  --plate 1 \
   --outdir /path/to/output \
   --threads 20
 ```
@@ -99,7 +98,6 @@ mfsflow \
   --fastqs /path/to/fastq_dir \
   --genomeDir /path/to/reference \
   --sample SAMPLE_NAME \
-  --plate 1 \
   --outdir /path/to/output \
   --threads 20
 ```

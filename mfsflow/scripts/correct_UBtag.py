@@ -67,20 +67,18 @@ def correct_tags(args):
     else:
         chrlabel = chr_name
     outpath = inpath+".tmp."+chrlabel+".bam"
-    inp = pysam.AlignmentFile(inpath, 'rb', threads=threads)
-    out = pysam.AlignmentFile(outpath, 'wb', template=inp, threads=threads)
-    for read in inp.fetch(chr_name):
-        umi = read.get_tag('UR')
-        cell = read.get_tag('CB')
-        if read.has_tag('GX'):
-            gene = read.get_tag('GX')
-        else:
-            gene = 'NA'
-        umi_new = return_UB(moldict=_worker_mols, BC=cell, GE=gene, UX=umi)
-        read.set_tag(tag='UB', value=umi_new, value_type='Z')
-        out.write(read)
-    inp.close()
-    out.close()
+    with pysam.AlignmentFile(inpath, 'rb', threads=threads) as inp, \
+         pysam.AlignmentFile(outpath, 'wb', template=inp, threads=threads) as out:
+        for read in inp.fetch(chr_name):
+            umi = read.get_tag('UR')
+            cell = read.get_tag('CB')
+            if read.has_tag('GX'):
+                gene = read.get_tag('GX')
+            else:
+                gene = 'NA'
+            umi_new = return_UB(moldict=_worker_mols, BC=cell, GE=gene, UX=umi)
+            read.set_tag(tag='UB', value=umi_new, value_type='Z')
+            out.write(read)
     return outpath
 
 def main():

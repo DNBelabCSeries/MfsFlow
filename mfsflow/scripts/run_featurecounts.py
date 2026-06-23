@@ -18,15 +18,17 @@ import collections
 import gzip
 import glob
 import hashlib
+from functools import lru_cache
 
 try:
-    from mfsflow.scripts.path_layout import expression_dir, stats_dir
+    from mfsflow.scripts.path_layout import expression_dir, stats_dir, load_config
 except ImportError:
-    from path_layout import expression_dir, stats_dir
+    from path_layout import expression_dir, stats_dir, load_config
 
-def load_config(yaml_file):
-    with open(yaml_file, 'r') as f:
-        return yaml.safe_load(f)
+# Constants
+LOG_INTERVAL_READS = 10_000_000  # Print progress every N reads
+GENEBODY_BIN_SIZE = 100_000  # Bin size for gene body coverage calculation
+LRU_CACHE_SIZE = 65_536  # Default LRU cache size for parsing functions
 
 def check_dependencies(samtools_exec, featurecounts_exec):
     def check_one(tool, name):
@@ -166,16 +168,11 @@ def load_gene_models(gtf_file):
     return models
 
 
-_GENEBODY_BIN_SIZE = 100000
-
-_gene_id_cache = {}
-_transcript_id_cache = {}
-_gene_name_cache = {}
+_GENEBODY_BIN_SIZE = GENEBODY_BIN_SIZE
 
 
+@lru_cache(maxsize=LRU_CACHE_SIZE)
 def _parse_transcript_id(attributes):
-    if attributes in _transcript_id_cache:
-        return _transcript_id_cache[attributes]
     result = None
     if 'transcript_id "' in attributes:
         result = attributes.split('transcript_id "')[1].split('"')[0]
@@ -184,7 +181,6 @@ def _parse_transcript_id(attributes):
             result = attributes.split('transcript_id')[1].strip().split(';')[0].strip().strip('"')
         except Exception:
             result = None
-    _transcript_id_cache[attributes] = result
     return result
 
 
@@ -204,9 +200,8 @@ def _merge_half_open_intervals(intervals):
     return merged
 
 
+@lru_cache(maxsize=LRU_CACHE_SIZE)
 def _parse_gene_id(attributes):
-    if attributes in _gene_id_cache:
-        return _gene_id_cache[attributes]
     result = None
     if 'gene_id "' in attributes:
         result = attributes.split('gene_id "')[1].split('"')[0]
@@ -215,18 +210,14 @@ def _parse_gene_id(attributes):
             result = attributes.split('gene_id')[1].strip().split(';')[0].strip().strip('"')
         except Exception:
             result = None
-    _gene_id_cache[attributes] = result
     return result
 
 
+@lru_cache(maxsize=LRU_CACHE_SIZE)
 def _parse_gene_name(attributes, gene_id):
-    cache_key = (attributes, gene_id)
-    if cache_key in _gene_name_cache:
-        return _gene_name_cache[cache_key]
     result = gene_id
     if 'gene_name "' in attributes:
         result = attributes.split('gene_name "')[1].split('"')[0]
-    _gene_name_cache[cache_key] = result
     return result
 
 
@@ -1030,7 +1021,7 @@ def process_bam_and_calculate_stats(
                 count = 0
                 for read in f_in:
                     count += 1
-                    if count % 1000000 == 0: print(f"Processed {count} reads...", end='\r')
+                    if count % LOG_INTERVAL_READS == 0: print(f"Processed {count} reads...", end='\r')
 
                     category = "Intergenic"
                     final_read = read
@@ -1125,7 +1116,7 @@ def process_bam_and_calculate_stats(
                 continue
 
             count += 1
-            if count % 1000000 == 0: print(f"Processed {count} reads...", end='\r')
+            if count % LOG_INTERVAL_READS == 0: print(f"Processed {count} reads...", end='\r')
 
             final_line = None
             category = "Intergenic"
@@ -1374,7 +1365,7 @@ def main():
     use_r_order = featurecounts_strategy in {"r", "r_order", "two_pass", "exact"}
     fraction_overlap = counting_opts.get("fraction_overlap", 0)
     allow_multi_overlap = bool(counting_opts.get("multi_overlap", False))
-    gene_body_max_reads = int(counting_opts.get("gene_body_max_reads", 5000000) or 0)
+    gene_body_max_reads = int(counting_opts.get("gene_body_max_reads", 50000000) or 0)
     gene_body_sample_seed = int(counting_opts.get("gene_body_sample_seed", 42) or 42)
     umi_strand_mode, internal_strand_mode = resolve_counting_strand_modes(counting_opts)
     print(

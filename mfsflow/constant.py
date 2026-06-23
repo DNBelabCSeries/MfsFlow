@@ -55,7 +55,7 @@ DEFAULT_CONFIG = {
         "internal_strand": 0,
         "Ham_Dist": 1,
         "twoPass": False,
-        "gene_body_max_reads": 5000000,
+        "gene_body_max_reads": 10000000,
         "gene_body_sample_seed": 42
     },
     "performance_opts": {
