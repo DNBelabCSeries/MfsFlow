@@ -122,42 +122,47 @@ def count_worker(args):
                 for read in iter_reads:
                     if read.is_unmapped:
                         continue
-                    if not read.has_tag("CB"):
+                    # Single CB fetch: replaces has_tag + get_tag (2 calls -> 1)
+                    try:
+                        bc = read.get_tag("CB")
+                    except KeyError:
                         continue
-                    
-                    bc = read.get_tag("CB")
                     if bc not in barcode_set:
                         continue
-                    
-                    if collect_global_umis and read.has_tag("UR"):
+
+                    # Single UR fetch: replaces up to 4 has_tag/get_tag calls below
+                    try:
                         umi = read.get_tag("UR")
+                    except KeyError:
+                        umi = None
+
+                    if collect_global_umis and umi is not None:
                         local_global_umi_counts[bc][umi] += 1
-                    
+
                     try:
                         gene_id = read.get_tag("GX")
                     except KeyError:
-                        continue 
-                    
+                        continue
+
                     if gene_set and gene_id not in gene_set:
                         continue
-                    
+
                     ftype = "exon"
-                    if read.has_tag("RE"):
+                    try:
                         xf = read.get_tag("RE")
                         if xf == "N":
                             ftype = "intron"
-                        elif xf == "E":
-                            ftype = "exon"
-                        else:
+                        elif xf != "E":
                             continue
-                    
+                    except KeyError:
+                        pass  # no RE tag: default exon
+
                     if not count_introns and ftype == 'intron':
                         continue
-                    
+
                     local_read_counts_raw[ftype][bc][gene_id] += 1
-                    
-                    if read.has_tag("UR"):
-                        umi = read.get_tag("UR")
+
+                    if umi is not None:
                         local_umi_data[ftype][bc][gene_id][umi] += 1
                         
     except Exception as e:
@@ -176,86 +181,33 @@ def count_worker(args):
 
     return ret_read_counts, ret_umi_data, ret_global_umi
 
-def correction_worker(args):
-    """
-    Worker for Pass 2: Correct UMIs.
-    Writes to a temporary sorted BAM file (chunks).
-    Input BAM is already sorted, so we just read and write in order.
-    """
-    bam_file, chroms, correction_map, ham_dist, out_tmp_bam = args
-    
-    try:
-        with pysam.AlignmentFile(bam_file, "rb") as infile:
-            with pysam.AlignmentFile(out_tmp_bam, "wb", template=infile) as outfile:
-                for chrom in chroms:
-                    try:
-                        iter_reads = infile.fetch(chrom)
-                    except ValueError:
-                        continue
-                        
-                    for read in iter_reads:
-                        raw_umi = None
-                        if read.has_tag("UR"):
-                            raw_umi = read.get_tag("UR")
-                        elif read.has_tag("UB"):
-                            raw_umi = read.get_tag("UB")
-                        if not raw_umi:
-                            outfile.write(read)
-                            continue
-                        if ham_dist <= 0:
-                            read.set_tag("UB", raw_umi)
-                            outfile.write(read)
-                            continue
-
-                        if read.has_tag("CB") and read.has_tag("GX"):
-                            bc = read.get_tag("CB")
-                            gene = read.get_tag("GX")
-                            final_umi = raw_umi
-                            
-                            if bc in correction_map:
-                                bc_map = correction_map[bc]
-                                if gene in bc_map:
-                                    final_umi = bc_map[gene].get(raw_umi, raw_umi)
-                            
-                            # Ensure final_umi is a string
-                            if final_umi is None: 
-                                final_umi = raw_umi
-                                    
-                            read.set_tag("UB", str(final_umi))
-                        else:
-                            # Revert: If no cell/gene assignment, remove UB tag (as requested)
-                            read.set_tag("UB", None)
-                        
-                        outfile.write(read)
-        
-        return out_tmp_bam
-        
-    except Exception as e:
-        print(f"Error in correction_worker for {chroms}: {e}")
-        return None
-
 
 def resolve_corrected_umi(read, correction_map, ham_dist):
-    raw_umi = None
-    if read.has_tag("UR"):
+    try:
         raw_umi = read.get_tag("UR")
-    elif read.has_tag("UB"):
-        raw_umi = read.get_tag("UB")
+    except KeyError:
+        try:
+            raw_umi = read.get_tag("UB")
+        except KeyError:
+            raw_umi = None
     if not raw_umi:
         return None, False
 
     if ham_dist <= 0:
         return raw_umi, True
 
-    if read.has_tag("CB") and read.has_tag("GX"):
+    try:
         bc = read.get_tag("CB")
         gene = read.get_tag("GX")
-        bc_map = correction_map.get(bc)
-        if bc_map:
-            gene_map = bc_map.get(gene)
-            if gene_map:
-                final_umi = gene_map.get(raw_umi, raw_umi)
-                return (raw_umi if final_umi is None else str(final_umi)), True
+    except KeyError:
+        return raw_umi, False
+
+    bc_map = correction_map.get(bc)
+    if bc_map:
+        gene_map = bc_map.get(gene)
+        if gene_map:
+            final_umi = gene_map.get(raw_umi, raw_umi)
+            return (raw_umi if final_umi is None else str(final_umi)), True
     return raw_umi, False
 
 

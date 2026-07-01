@@ -6,9 +6,8 @@
 
 - **End-to-End Pipeline**: Complete workflow including filtering, mapping, counting, and statistical analysis
 - **Dual Report Modes**: Automatic and manual report generation for different analysis scenarios
-- **Multi-Species Support**: Optimized for Human and Mouse genomes
 - **Flexible Barcode Modes**: Support for plate-based, manual, and discovery barcode modes
-- **Efficient Processing**: Streaming barcode correction and optimized parallel processing
+- **Efficient Processing**: Streamed BAM I/O between stages, single-pass FASTQ splitting, and in-stream barcode correction
 - **Detailed Reporting**: Comprehensive HTML reports with interactive plots and QC metrics
 - **MEX & H5AD Output**: Standard MEX format and AnnData (H5AD) for seamless downstream analysis
 
@@ -45,6 +44,7 @@ Required Python packages:
 - matplotlib>=3.5
 - anndata>=0.8
 - h5py>=3.1
+- Pillow>=9.0
 
 **Note**: All packages use open version ranges for maximum compatibility. If you encounter dependency conflicts, you can adjust versions as needed.
 
@@ -69,7 +69,7 @@ pip install .
 This will install the `mfsflow` command-line tool.
 
 ### 4. Set Up External Tools
-Ensure STAR, Samtools, Pigz, Seqkit, and FeatureCounts are in your PATH, or specify their locations in the configuration.
+On **Linux**, the bundled tools under `software/` are prepended to `PATH` automatically — no manual installation is needed. 
 
 Reference databases can be built with STAR directly, or prepared from compatible
 DNBelab C Series (`dnbc4tools`) and Cell Ranger references. The expected layout is
@@ -211,6 +211,7 @@ mfsflow \
   --tmpRoot /dev/shm
 ```
 
+
 ## 📊 Reference Genome Preparation
 
 ### Build STAR Index
@@ -242,4 +243,4 @@ For questions, bug reports, or feature requests, please open an issue on GitHub.
 ---
 
 **Version**: 1.0.0  
-**Last Updated**: 2026-05-25
+**Last Updated**: 2026-07-01

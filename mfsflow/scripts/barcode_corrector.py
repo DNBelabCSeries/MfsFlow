@@ -67,11 +67,11 @@ def load_id_map(id_map_file, strict=False):
 
 
 def correct_read_barcode(read, bc_map, id_map, internal_bcs):
-    raw_bc = None
-    if read.has_tag("CR"):
+    try:
         value = read.get_tag("CR")
-        if isinstance(value, str):
-            raw_bc = value.upper()
+    except KeyError:
+        value = None
+    raw_bc = value.upper() if isinstance(value, str) else None
 
     if not raw_bc:
         return None
@@ -87,8 +87,8 @@ def correct_read_barcode(read, bc_map, id_map, internal_bcs):
         read.set_tag("CC", corrected_bc)
         read.set_tag("CB", well_id)
     else:
-        read.set_tag("CC", None)
-        read.set_tag("CB", None)
+        for tag in ("CC", "CB"):
+            read.set_tag(tag, None)
 
     return BarcodeCorrection(
         raw_bc=raw_bc,
@@ -110,8 +110,14 @@ def _adjust_read_sequence(read, is_internal):
                 read.query_qualities = qual[3:] if qual is not None and len(qual) == len(seq) else None
             return
 
-        umi_seq = read.get_tag("UR") if read.has_tag("UR") else None
-        umi_qual = read.get_tag("UY") if read.has_tag("UY") else None
+        try:
+            umi_seq = read.get_tag("UR")
+        except KeyError:
+            umi_seq = None
+        try:
+            umi_qual = read.get_tag("UY")
+        except KeyError:
+            umi_qual = None
         if umi_seq:
             read.query_sequence = umi_seq + seq
             if qual is not None and umi_qual is not None and len(umi_qual) == len(umi_seq):

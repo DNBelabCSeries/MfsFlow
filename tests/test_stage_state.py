@@ -32,6 +32,49 @@ class StageStateTests(unittest.TestCase):
             ["/tools/samtools", "quickcheck", "-v", "-u", "/tmp/raw.tagged.bam"],
         )
 
+    @staticmethod
+    def _write_no_sq_bam(path):
+        """Write a valid BAM whose header has no @SQ lines (mimics fqfilter output)."""
+        import pysam
+        header = {"HD": {"VN": "1.6", "SO": "unsorted"}}
+        with pysam.AlignmentFile(path, "wb", header=header) as bam:
+            a = pysam.AlignedSegment()
+            a.query_name = "read1"
+            a.flag = 4
+            a.query_sequence = "ACGT"
+            a.query_qualities = [30, 30, 30, 30]
+            bam.write(a)
+
+    def test_quickcheck_pysam_fallback_when_samtools_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bam = os.path.join(tmpdir, "raw.tagged.bam")
+            self._write_no_sq_bam(bam)
+            runtime = SimpleNamespace(tools=SimpleNamespace(samtools=None))
+            _quickcheck_bams(runtime, [bam], unmapped=True)
+
+    def test_quickcheck_pysam_fallback_when_samtools_old_rejects_u_flag(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bam = os.path.join(tmpdir, "raw.tagged.bam")
+            self._write_no_sq_bam(bam)
+            runtime = SimpleNamespace(tools=SimpleNamespace(samtools="/tools/samtools"))
+            completed = SimpleNamespace(returncode=2, stdout="unknown option -u")
+            with mock.patch("mfsflow.stage_state.os.path.isfile", return_value=True), \
+                 mock.patch("mfsflow.stage_state.os.access", return_value=True), \
+                 mock.patch("mfsflow.stage_state.subprocess.run", return_value=completed):
+                _quickcheck_bams(runtime, [bam], unmapped=True)
+
+    def test_quickcheck_pysam_fallback_rejects_corrupt_bam(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bam = os.path.join(tmpdir, "raw.tagged.bam")
+            self._write_no_sq_bam(bam)
+            with open(bam, "rb") as handle:
+                data = handle.read()
+            with open(bam, "wb") as handle:
+                handle.write(data[: len(data) // 2])
+            runtime = SimpleNamespace(tools=SimpleNamespace(samtools=None))
+            with self.assertRaisesRegex(RuntimeError, "BAM integrity check failed"):
+                _quickcheck_bams(runtime, [bam], unmapped=True)
+
     def test_filtering_manifest_uses_unmapped_quickcheck_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime = self.make_runtime(tmpdir)

@@ -10,7 +10,6 @@ for downstream mapping.
 import glob
 import gzip
 import math
-import multiprocessing
 import os
 import subprocess
 
@@ -51,7 +50,6 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
     samtools = runtime.tools.samtools
     pigz = runtime.tools.pigz
     seqkit = runtime.tools.seqkit
-    toolkit_dir = runtime.toolkit_dir
     exec_env = runtime.exec_env
     analysis_dir = runtime.analysis_dir
     tmp_merge_path = runtime.tmp_merge_path
@@ -99,26 +97,18 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
     log_info(f"Split config: {split_parts} chunk parts, {lines_per_chunk} lines per chunk.")
 
     with timer.section("Filtering: split FASTQ", f"parts={split_parts};lines_per_chunk={lines_per_chunk};threads={num_threads}"):
-        pool = multiprocessing.Pool(processes=min(2, num_threads))
-        results = []
-
-        if fq2_files:
-            res = pool.apply_async(
-                pipeline_modules.split_fastq,
-                (fq1_files, num_threads, lines_per_chunk, tmp_merge_path, project, pigz, seqkit, fq2_files, False, split_parts),
-            )
-            results.append(res)
-        else:
-            res = pool.apply_async(
-                pipeline_modules.split_fastq,
-                (fq1_files, num_threads, lines_per_chunk, tmp_merge_path, project, pigz, seqkit, None, False, split_parts),
-            )
-            results.append(res)
-
-        pool.close()
-        pool.join()
-
-        chunk_suffixes = results[0].get()
+        chunk_suffixes = pipeline_modules.split_fastq(
+            fq1_files,
+            num_threads,
+            lines_per_chunk,
+            tmp_merge_path,
+            project,
+            pigz,
+            seqkit,
+            fq2_files,
+            False,
+            split_parts,
+        )
 
     log_info("Running fqfilter.py on chunks")
     max_reads = config.get("counting_opts", {}).get("max_reads", 0)
@@ -127,12 +117,10 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
         processes = []
         max_filter_jobs = max(1, min(len(chunk_suffixes), max(1, num_threads // 3)))
         threads_per_filter = max(1, num_threads // max_filter_jobs)
-        fqfilter_pigz_threads = max(1, min(2, threads_per_filter // 2))
-        fqfilter_samtools_threads = max(1, min(2, threads_per_filter - fqfilter_pigz_threads))
+        fqfilter_pigz_threads = max(1, min(2, threads_per_filter))
         log_info(
             "fqfilter parallel jobs: "
-            f"{max_filter_jobs}; pigz threads/job: {fqfilter_pigz_threads}; "
-            f"samtools threads/job: {fqfilter_samtools_threads}"
+            f"{max_filter_jobs}; pigz threads/job: {fqfilter_pigz_threads}"
         )
 
         def wait_for_filter_process(proc):
@@ -141,11 +129,8 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
                 raise RuntimeError(f"fqfilter failed (rc={proc.returncode}). Check {runtime.log_path} for details.")
 
         for suffix in chunk_suffixes:
-            cmd = [python_exec, resolve_script("fqfilter.py"), yaml_file, samtools, pigz, toolkit_dir, suffix]
-            cmd.extend([
-                "--pigz-threads", str(fqfilter_pigz_threads),
-                "--samtools-threads", str(fqfilter_samtools_threads),
-            ])
+            cmd = [python_exec, resolve_script("fqfilter.py"), yaml_file, pigz, suffix]
+            cmd.extend(["--pigz-threads", str(fqfilter_pigz_threads)])
 
             if max_reads and int(max_reads) > 0:
                 chunk_limit = int(int(max_reads) / len(chunk_suffixes))

@@ -66,11 +66,12 @@ def main():
                 continue
 
             # Initialize output using header from first file
-            # Output SAM (Uncompressed Text) to stdout for STAR compatibility
+            # Output BAM (binary) to stdout; STAR reads it via --readFilesCommand samtools view.
+            # Binary BAM avoids the ~30% SAM text serialization overhead of pysam mode "w".
             if outfile is None:
                 try:
-                    # Mode "w" = SAM text. File "-" = stdout.
-                    outfile = pysam.AlignmentFile("-", "w", template=infile)
+                    # Mode "wb" = BAM binary. File "-" = stdout.
+                    outfile = pysam.AlignmentFile("-", "wb", template=infile)
                 except (BrokenPipeError, IOError):
                     infile.close()
                     return

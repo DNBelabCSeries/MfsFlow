@@ -41,23 +41,45 @@ def _quickcheck_bams(runtime, paths, unmapped=False):
     if not paths:
         return
     samtools = getattr(getattr(runtime, "tools", None), "samtools", None)
-    if not samtools:
-        return
-    if not ((os.path.isfile(str(samtools)) and os.access(str(samtools), os.X_OK)) or shutil.which(str(samtools))):
-        return
-    command = [str(samtools), "quickcheck", "-v"]
-    if unmapped:
-        command.append("-u")
-    command.extend(paths)
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+    samtools_available = bool(samtools) and (
+        (os.path.isfile(str(samtools)) and os.access(str(samtools), os.X_OK))
+        or shutil.which(str(samtools))
     )
-    if result.returncode != 0:
-        details = result.stdout.strip() or "samtools quickcheck returned a non-zero status"
-        raise RuntimeError(f"BAM integrity check failed: {details}")
+    if samtools_available:
+        command = [str(samtools), "quickcheck", "-v"]
+        if unmapped:
+            command.append("-u")
+        command.extend(paths)
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if result.returncode == 0:
+            return
+        if not unmapped:
+            details = result.stdout.strip() or "samtools quickcheck returned a non-zero status"
+            raise RuntimeError(f"BAM integrity check failed: {details}")
+        # Unmapped BAMs lack @SQ headers; samtools < 1.10 (no -u support) rejects
+        # them. Fall back to pysam which handles no-SQ BAMs natively.
+    if unmapped:
+        _pysam_validate_bams(paths)
+
+
+def _pysam_validate_bams(paths):
+    """Fallback validation for unmapped (no-SQ) BAMs when samtools is unavailable
+    or lacks quickcheck -u support (samtools < 1.10)."""
+    import pysam
+    failures = []
+    for path in paths:
+        try:
+            with pysam.AlignmentFile(path, "rb", check_sq=False) as bam:
+                next(bam.fetch(until_eof=True), None)
+        except Exception as exc:
+            failures.append(f"{path}: {exc}")
+    if failures:
+        raise RuntimeError("BAM integrity check failed: " + "; ".join(failures))
 
 
 def _glob_files(patterns):

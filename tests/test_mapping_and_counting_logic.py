@@ -17,8 +17,11 @@ class MappingAndCountingLogicTests(unittest.TestCase):
             False,
             "/tmp/genes.gtf",
             101,
+            "samtools",
         )
         self.assertIn("--sjdbOverhang 100", misc)
+        # stream_corrector outputs BAM; STAR must decode via samtools view
+        self.assertIn('--readFilesCommand "samtools view"', misc)
 
     def test_build_star_misc_base_skips_overhang_when_index_has_sjdb(self):
         misc = build_star_misc_base(
@@ -28,6 +31,7 @@ class MappingAndCountingLogicTests(unittest.TestCase):
             True,
             "/tmp/genes.gtf",
             0,
+            "samtools",
         )
         self.assertNotIn("--sjdbOverhang", misc)
         self.assertNotIn("--sjdbGTFfile", misc)

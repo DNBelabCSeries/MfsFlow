@@ -174,11 +174,13 @@ def star_index_has_embedded_sjdb(index_params):
     return bool(overhang and overhang not in ("-", "None", "0"))
 
 
-def build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, read_len):
+def build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, read_len, samtools):
     misc_parts = [
         f"--genomeDir {star_index}",
         f"--runThreadN {num_threads}",
         f"--readFilesType SAM {read_layout}",
+        # stream_corrector.py outputs BAM (binary); samtools view decodes it for STAR.
+        f'--readFilesCommand "{samtools} view"',
         "--outSAMmultNmax 1",
         "--outFilterMultimapNmax 50",
         "--outSAMunmapped Within",
@@ -400,7 +402,7 @@ def main():
         
         # STAR Command (Consumer)
         # --readFilesIn /dev/stdin
-        misc_base = build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, umi_read_len)
+        misc_base = build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, umi_read_len, samtools)
         cmd_umi = f"{star_exec} {misc_base} {extra_params} {param_add_fa} {twopass} --readFilesIn /dev/stdin --outFileNamePrefix {prefix_umi}"
         
         run_star_pipe(corrector_args, cmd_umi)
@@ -414,7 +416,7 @@ def main():
         corrector_args = [sys.executable or 'python3', corrector_script, '--binning', bc_bin_file, '--idmap', expect_id_file, '--type', 'internal'] + internal_bams
         
         # STAR Command
-        misc_base = build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, internal_read_len)
+        misc_base = build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, internal_read_len, samtools)
         cmd_int = f"{star_exec} {misc_base} {extra_params} {param_add_fa} {twopass} --readFilesIn /dev/stdin --outFileNamePrefix {prefix_int}"
         
         run_star_pipe(corrector_args, cmd_int)

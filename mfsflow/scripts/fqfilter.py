@@ -12,6 +12,8 @@ import subprocess
 import re
 import os
 
+import pysam
+
 try:
     from mfsflow.scripts.path_layout import tmp_merge_dir, load_config
 except ImportError:
@@ -106,15 +108,13 @@ def fastq_iter(handle):
         yield header.rstrip(b'\n\r'), seq, qual
 
 def main():
-    if len(sys.argv) < 6:
-        print("Usage: python3 fqfilter.py <yaml> <samtools> <pigz> <toolkit_dir> <tmp_prefix> [--limit N] [--pigz-threads N] [--samtools-threads N]")
-        print("Legacy: python3 fqfilter.py <yaml> <samtools> <rscript> <pigz> <toolkit_dir> <tmp_prefix> [--limit N] [--pigz-threads N] [--samtools-threads N]")
+    if len(sys.argv) < 4:
+        print("Usage: python3 fqfilter.py <yaml> <pigz> <tmp_prefix> [--limit N] [--pigz-threads N]")
         sys.exit(1)
 
     args = sys.argv[1:]
     read_limit = 0
     pigz_threads = 1
-    samtools_threads = 1
     if '--limit' in args:
         try:
             idx = args.index('--limit')
@@ -129,30 +129,11 @@ def main():
             args = args[:idx] + args[idx + 2:]
         except Exception:
             pigz_threads = 1
-    if '--samtools-threads' in args:
-        try:
-            idx = args.index('--samtools-threads')
-            samtools_threads = max(1, int(args[idx + 1]))
-            args = args[:idx] + args[idx + 2:]
-        except Exception:
-            samtools_threads = 1
 
     yaml_file = args[0]
-    samtools = args[1]
+    pigz = args[1]
+    tmp_prefix = args[2]
 
-    def _is_pigz(x):
-        base = os.path.basename(str(x)).lower()
-        return base.startswith('pigz')
-
-    if len(args) >= 5 and _is_pigz(args[2]):
-        pigz = args[2]
-        tmp_prefix = args[4]
-    elif len(args) >= 6:
-        pigz = args[3]
-        tmp_prefix = args[5]
-    else:
-        raise SystemExit("Invalid arguments. Expected <yaml> <samtools> <pigz> <toolkit_dir> <tmp_prefix> [--limit N].")
-            
     config = get_config(yaml_file)
     project = config['project']
     out_dir = config['out_dir']
@@ -203,7 +184,14 @@ def main():
         ]
     else:
         umi_filter = list(map(int, str(config['filter_cutoffs']['UMI_filter']).split()))
-    
+
+    def _lowq_table(phred_threshold):
+        limit = phred_threshold + 33
+        return bytes(1 if i < limit else 0 for i in range(256))
+
+    bc_lowq_table = _lowq_table(bc_filter[1])
+    umi_lowq_table = _lowq_table(umi_filter[1])
+
     merge_dir = tmp_merge_dir(out_dir)
     out_bam = os.path.join(merge_dir, f"{project}{tmp_prefix}.raw.tagged.bam")
     out_bc_stats = os.path.join(merge_dir, f"{project}{tmp_prefix}.BCstats.txt")
@@ -269,33 +257,24 @@ def main():
             q30_bases + sum(qual.translate(Q30_TABLE)),
         )
     
-    out_bam_fh = open(out_bam, 'wb')
-    samtools_proc = subprocess.Popen(
-        [samtools, 'view', '-@', str(samtools_threads), '-Sb', '-'],
-        stdin=subprocess.PIPE,
-        stdout=out_bam_fh,
-    )
-    bam_out = samtools_proc.stdin
-
-    # PG Header
-    pg_line = f"@PG\tID:MfsFlow-fqfilter\tPN:MfsFlow-fqfilter\tVN:3.0\tCL:python3 fqfilter.py {' '.join(sys.argv[1:])}\n"
-    bam_out.write(pg_line.encode("utf-8"))
+    bam_header = {
+        "HD": {"VN": "1.6", "SO": "unsorted"},
+        "PG": [{
+            "ID": "MfsFlow-fqfilter",
+            "PN": "MfsFlow-fqfilter",
+            "VN": "3.0",
+            "CL": "python3 fqfilter.py " + " ".join(sys.argv[1:]),
+        }],
+    }
+    bam_out = pysam.AlignmentFile(out_bam, "wb", header=bam_header)
 
     total = 0
     filtered = 0
     
     processing_error = None
 
-    def check_qual(q_str, threshold_count, threshold_val):
-        # (q - 33) < threshold_val  =>  q < threshold_val + 33
-        limit = threshold_val + 33
-        low_quals = 0
-        for q in q_str:
-            if q < limit:
-                low_quals += 1
-                if low_quals >= threshold_count:
-                    return False
-        return True
+    def check_qual(q_str, threshold_count, table):
+        return sum(q_str.translate(table)) < threshold_count
 
     def process_records(records, fixed_bc):
         nonlocal total, filtered
@@ -360,9 +339,9 @@ def main():
             final_bc = fixed_bc
             final_bc_q = b"I" * len(fixed_bc)
 
-        if not check_qual(final_bc_q, bc_filter[0], bc_filter[1]):
+        if not check_qual(final_bc_q, bc_filter[0], bc_lowq_table):
             return True
-        if not check_qual(final_umi_q, umi_filter[0], umi_filter[1]):
+        if not check_qual(final_umi_q, umi_filter[0], umi_lowq_table):
             return True
 
         filtered += 1
@@ -371,34 +350,31 @@ def main():
         rid = records[0][0].split()[0]
         if rid.startswith(b'@'):
             rid = rid[1:]
+        qname = rid.decode('ascii')
 
-        tags = (
-            b"\tCR:Z:" + final_bc +
-            b"\tUR:Z:" + final_umi +
-            b"\tCY:Z:" + final_bc_q +
-            b"\tUY:Z:" + final_umi_q +
-            b"\n"
-        )
+        bc_str = final_bc.decode('ascii')
+        bc_q_str = final_bc_q.decode('ascii')
+        umi_str = final_umi.decode('ascii')
+        umi_q_str = final_umi_q.decode('ascii')
 
-        seq1_out = final_cdna1 if final_cdna1 else b"*"
-        qual1_out = final_cdna1_q if final_cdna1_q else b"*"
-        seq2_out = final_cdna2 if final_cdna2 else b"*"
-        qual2_out = final_cdna2_q if final_cdna2_q else b"*"
+        def _make_read(flag, seq, qual):
+            a = pysam.AlignedSegment()
+            a.query_name = qname
+            a.flag = flag
+            if seq:
+                a.query_sequence = seq.decode('ascii')
+                a.query_qualities = [b - 33 for b in qual]
+            a.set_tag("CR", bc_str, "Z")
+            a.set_tag("UR", umi_str, "Z")
+            a.set_tag("CY", bc_q_str, "Z")
+            a.set_tag("UY", umi_q_str, "Z")
+            return a
 
         if layout == "SE":
-            line = b"\t".join([
-                rid, b"4", b"*", b"0", b"0", b"*", b"*", b"0", b"0", seq1_out, qual1_out
-            ]) + tags
-            bam_out.write(line)
+            bam_out.write(_make_read(4, final_cdna1, final_cdna1_q))
         else:
-            line1 = b"\t".join([
-                rid, b"77", b"*", b"0", b"0", b"*", b"*", b"0", b"0", seq1_out, qual1_out
-            ]) + tags
-            line2 = b"\t".join([
-                rid, b"141", b"*", b"0", b"0", b"*", b"*", b"0", b"0", seq2_out, qual2_out
-            ]) + tags
-            bam_out.write(line1)
-            bam_out.write(line2)
+            bam_out.write(_make_read(77, final_cdna1, final_cdna1_q))
+            bam_out.write(_make_read(141, final_cdna2, final_cdna2_q))
         return True
 
     try:
@@ -444,12 +420,6 @@ def main():
             bam_out.close()
         except Exception:
             pass
-
-        samtools_proc.wait()
-        out_bam_fh.close()
-
-        if samtools_proc.returncode != 0:
-            raise RuntimeError(f"samtools failed (rc={samtools_proc.returncode}) writing {out_bam}")
 
     if processing_error is not None:
         raise processing_error

@@ -126,20 +126,13 @@ def split_fastq(
         f"Compress Output: {compress_chunks}"
     )
 
-    # Prepare suffixes list to return
-    # We need to collect ALL suffixes generated.
-    # Since we process files in parallel, we need to gather them carefully.
-    # Actually, the original code returns a list of suffixes from the LAST file? 
-    # Or merges them? 
-    # The return value is used by fqfilter to iterate.
-    # fqfilter expects chunks to exist for all files for a given suffix?
-    # No, fqfilter iterates over suffixes, and for each suffix, it iterates over input files.
-    # So we must ensure that for every file, the same set of suffixes exists.
-    # If we split independently, we must ensure line counts match exactly so chunks match.
-    # Seqkit -1 -2 guarantees this for PE.
-    
-    # We will collect suffixes from the first file/pair and assume consistency.
-    first_file_suffixes = []
+    # Collect the UNION of chunk suffixes across all input files. With seqkit
+    # split2 -s (records-per-chunk), files of different sizes produce different
+    # numbers of chunks. This is safe because fqfilter's make_read_groups()
+    # puts each PE pair in its own group and skips a group entirely when any
+    # file in that group lacks a given suffix — so extra chunks from larger
+    # files are still processed by their own group, never silently dropped.
+    # Within a PE pair, seqkit -1 -2 guarantees R1/R2 chunk counts match.
 
     for i, fpath1 in enumerate(fq_files):
         fpath2 = fq2_files[i] if mode == "PE" else None
@@ -174,25 +167,28 @@ def split_fastq(
 
         cmd = ""
         if has_seqkit:
-            # seqkit split2 -p N (by parts)
-            # Split parts are tuned independently from total CPU threads.  This
+            # seqkit split2 -s N (by records per file, single-pass streaming).
+            # Using -s instead of -p avoids the 2-pass counting read that -p triggers.
+            # records_per_chunk is derived from lines_per_chunk (4 lines per FASTQ record).
+            # Split parts are tuned independently from total CPU threads. This
             # keeps downstream fqfilter parallelism balanced without producing
             # excessive temporary FASTQ chunks.
-            # Note: -p triggers 2-pass reading (counting then splitting), but it's robust.
-            
+
             # Distribute threads among concurrent jobs
             seqkit_threads = max(1, n_threads // num_concurrent_jobs)
-            
+
             seqkit_cmd = shlex.quote(seqkit_exec) if os.path.exists(seqkit_exec) else seqkit_exec
-            
+
             ext_flag = "-e .fastq" if not compress_chunks else ""
-            
+
+            records_per_chunk = max(1, lines_per_chunk // 4)
+
             if mode == "PE":
                 # PE Split
-                cmd = f"{seqkit_cmd} split2 -p {split_parts} -1 {shlex.quote(fpath1)} -2 {shlex.quote(fpath2)} -O {shlex.quote(out_dir)} -f -j {seqkit_threads} {ext_flag}"
+                cmd = f"{seqkit_cmd} split2 -s {records_per_chunk} -1 {shlex.quote(fpath1)} -2 {shlex.quote(fpath2)} -O {shlex.quote(out_dir)} -f -j {seqkit_threads} {ext_flag}"
             else:
                 # SE Split
-                cmd = f"{seqkit_cmd} split2 -p {split_parts} -O {shlex.quote(out_dir)} -f {shlex.quote(fpath1)} -j {seqkit_threads} {ext_flag}"
+                cmd = f"{seqkit_cmd} split2 -s {records_per_chunk} -O {shlex.quote(out_dir)} -f {shlex.quote(fpath1)} -j {seqkit_threads} {ext_flag}"
         
         else:
             # GNU split Fallback

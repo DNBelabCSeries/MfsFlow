@@ -63,7 +63,11 @@ def get_bam_chromosomes(bam_file, samtools_exec='samtools'):
 
 
 def estimate_primary_mapped_reads(bam_file, samtools_exec='samtools'):
-    """Count primary mapped alignments for coverage sampling fraction estimation."""
+    """Count primary mapped alignments for coverage sampling fraction estimation.
+
+    This performs a full ``samtools view -c -F 2308`` scan and is retained as a
+    fallback when no featureCounts summary is available.
+    """
     try:
         output = subprocess.check_output(
             [samtools_exec, "view", "-c", "-F", "2308", bam_file],
@@ -73,6 +77,71 @@ def estimate_primary_mapped_reads(bam_file, samtools_exec='samtools'):
     except Exception as exc:
         print(f"Warning: Could not estimate mapped read count for {bam_file}: {exc}")
         return 0
+
+
+def parse_featurecounts_mapped_reads(fc_bam, read_layout="PE"):
+    """Derive primary mapped alignment count from a featureCounts ``.summary`` file.
+
+    Avoids a full BAM scan: featureCounts already reports per-status counts. The
+    summary path is derived from the returned BAM path (``<out_prefix>.bam`` ->
+    ``<out_prefix>.counts.txt.summary``). Returns ``None`` if the summary is
+    missing/unreadable so callers can fall back to ``estimate_primary_mapped_reads``.
+
+    featureCounts counts fragments in paired-end mode while ``samtools view -c``
+    counts alignments (one per mate), so the PE fragment count is doubled to match
+    the alignment-based denominator the coverage loop iterates over.
+
+    .. warning::
+
+        This is an **approximation**, not an exact equivalent of
+        ``samtools view -c -F 2308``. MfsFlow runs featureCounts with
+        ``--primary``, which filters secondary alignments (FLAG 0x100) but does
+        **not** filter supplementary alignments (FLAG 0x800). The coverage loop
+        (:func:`should_count_read`) skips both secondary and supplementary, so
+        the true denominator is smaller than what this function returns.
+
+        **Impact**: the sampling fraction is slightly too small, so fewer reads
+        are sampled for gene body coverage than the target. This affects
+        coverage curve smoothness, **not** bias direction — the 5'/3' skew
+        conclusion is unchanged. The default ``gene_body_max_reads`` is bumped
+        to 12M to compensate for this denominator inflation.
+    """
+    if not fc_bam:
+        return None
+    if fc_bam.endswith(".bam"):
+        summary_path = fc_bam[:-4] + ".counts.txt.summary"
+    else:
+        summary_path = fc_bam + ".counts.txt.summary"
+    if not os.path.exists(summary_path):
+        return None
+    totals = {}
+    try:
+        with open(summary_path) as fh:
+            fh.readline()  # header: Status<TAB>sample
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 2 or not parts[1].strip().isdigit():
+                    continue
+                totals[parts[0]] = int(parts[1])
+    except Exception as exc:
+        print(f"Warning: Could not parse featureCounts summary {summary_path}: {exc}")
+        return None
+    if not totals:
+        return None
+    total = sum(totals.values())
+    unmapped = totals.get("Unassigned_Unmapped", 0)
+    primary_mapped = max(0, total - unmapped)
+    if str(read_layout or "").upper() == "PE":
+        primary_mapped *= 2
+    return primary_mapped
+
+
+def primary_mapped_for_coverage(fc_bam, samtools_exec, read_layout="PE"):
+    """Primary mapped alignment count for coverage sampling, summary-first."""
+    n = parse_featurecounts_mapped_reads(fc_bam, read_layout)
+    if n is None:
+        n = estimate_primary_mapped_reads(fc_bam, samtools_exec)
+    return n
 
 
 def coverage_sampling_fraction(total_reads, target_reads):
@@ -549,10 +618,10 @@ def run_featurecounts_cmd(
 
     subprocess.check_call(cmd)
 
-    for suffix in ["", ".summary"]:
-        path = output_counts + suffix
-        if os.path.exists(path):
-            os.remove(path)
+    # Keep the .summary file (used by parse_featurecounts_mapped_reads to avoid
+    # a redundant full BAM scan); remove the per-feature counts matrix only.
+    if os.path.exists(output_counts):
+        os.remove(output_counts)
 
     generated_bam = f"{input_bam}.featureCounts.bam"
     if not os.path.exists(generated_bam):
@@ -918,12 +987,12 @@ def process_bam_and_calculate_stats(
     intron_index = intron_index or {}
     intron_starts = intron_starts or {}
 
-    def update_stats(read_obj, category, source_lbl):
+    def update_stats(read_obj, category, source_lbl, cb_value=None):
         category = normalize_read_category(category)
-        bc = None
         if isinstance(read_obj, str):
             if not should_count_read(read_obj):
                 return
+            bc = None
             cb_idx = read_obj.find("CB:Z:")
             if cb_idx != -1:
                 end_cb = read_obj.find('\t', cb_idx)
@@ -938,13 +1007,18 @@ def process_bam_and_calculate_stats(
         else: # pysam
             if not should_count_read(read_obj):
                 return
-            if read_obj.has_tag("CB"):
-                bc = read_obj.get_tag("CB")
-                read_stats[bc][category] += 1
-                if source_lbl == 'UMI': read_stats[bc]['UMI_Reads'] += 1
-                elif source_lbl == 'Internal': read_stats[bc]['Internal_Reads'] += 1
-            else:
-                 read_stats["__NO_CB__"]["Unused BC"] += 1
+            bc = cb_value
+            if bc is None:
+                try:
+                    bc = read_obj.get_tag("CB")
+                except KeyError:
+                    pass
+            if bc is None:
+                read_stats["__NO_CB__"]["Unused BC"] += 1
+                return
+            read_stats[bc][category] += 1
+            if source_lbl == 'UMI': read_stats[bc]['UMI_Reads'] += 1
+            elif source_lbl == 'Internal': read_stats[bc]['Internal_Reads'] += 1
 
     def update_coverage(read_obj, gene_models, cov_arr):
         if not collect_coverage or not gene_models: return False
@@ -1026,8 +1100,16 @@ def process_bam_and_calculate_stats(
                     category = "Intergenic"
                     final_read = read
 
-                    xt_values = [value for tag, value in read.get_tags() if tag == "XT"]
+                    tag_values = {}
+                    xt_values = []
+                    for tag, value in read.get_tags():
+                        if tag == "XT":
+                            xt_values.append(value)
+                        elif tag not in tag_values:
+                            tag_values[tag] = value
+
                     gene_id, re_tag, assigned_category = choose_assignment_from_xt(xt_values)
+                    final_gene_id = gene_id or tag_values.get('GX')
                     if gene_id:
                         final_read.set_tag('GX', gene_id)
                         final_read.set_tag('RE', re_tag)
@@ -1036,8 +1118,8 @@ def process_bam_and_calculate_stats(
                     else:
                         # Unassigned
                         status = "Unassigned"
-                        if read.has_tag('XS'):
-                            xs_val = read.get_tag('XS')
+                        xs_val = tag_values.get('XS')
+                        if xs_val is not None:
                             if "Unassigned_" in xs_val:
                                 status = xs_val.replace("Unassigned_", "")
                             elif xs_val == "Assigned":
@@ -1055,6 +1137,7 @@ def process_bam_and_calculate_stats(
                              if intron_gene:
                                  final_read.set_tag('GX', intron_gene)
                                  final_read.set_tag('RE', 'N')
+                                 final_gene_id = intron_gene
                                  category = "Intron"
                              elif intron_category == "Ambiguity":
                                  category = "Ambiguity"
@@ -1072,14 +1155,12 @@ def process_bam_and_calculate_stats(
                     if source_label:
                         final_read.set_tag('SR', source_label)
 
-                    if final_read.has_tag('GX'):
-                        g_id = final_read.get_tag('GX')
-                        if gene_map:
-                            g_name = gene_map.get(g_id, g_id)
-                            final_read.set_tag('GN', g_name)
+                    if final_gene_id and gene_map:
+                        g_name = gene_map.get(final_gene_id, final_gene_id)
+                        final_read.set_tag('GN', g_name)
 
                     # Stats
-                    update_stats(final_read, category, source_label)
+                    update_stats(final_read, category, source_label, tag_values.get('CB'))
                     if collect_coverage and update_coverage(final_read, gene_models, cov_arr):
                         cov_count += 1
 
@@ -1227,12 +1308,12 @@ def split_bam_smartseq3(bam_file, threads, samtools_exec):
                  pysam.AlignmentFile(internal_bam, "wb", template=infile, threads=write_threads) as out_int:
 
                 for read in infile:
-                    if read.has_tag('UR'):
+                    try:
                         val = read.get_tag('UR')
-                        if val:
-                            out_umi.write(read)
-                        else:
-                            out_int.write(read)
+                    except KeyError:
+                        val = None
+                    if val:
+                        out_umi.write(read)
                     else:
                         out_int.write(read)
         return internal_bam, umi_bam
@@ -1365,7 +1446,7 @@ def main():
     use_r_order = featurecounts_strategy in {"r", "r_order", "two_pass", "exact"}
     fraction_overlap = counting_opts.get("fraction_overlap", 0)
     allow_multi_overlap = bool(counting_opts.get("multi_overlap", False))
-    gene_body_max_reads = int(counting_opts.get("gene_body_max_reads", 50000000) or 0)
+    gene_body_max_reads = int(counting_opts.get("gene_body_max_reads", 12000000) or 0)
     gene_body_sample_seed = int(counting_opts.get("gene_body_sample_seed", 42) or 42)
     umi_strand_mode, internal_strand_mode = resolve_counting_strand_modes(counting_opts)
     print(
@@ -1466,7 +1547,10 @@ def main():
         with pysam.AlignmentFile(fc_outputs[0][1], "rb", threads=int(num_threads)) as template_in:
             with pysam.AlignmentFile(final_bam, "wb", template=template_in, threads=int(num_threads)) as final_out:
                 for source_label, fc_bam, fc_strand_mode in fc_outputs:
-                    mapped_for_cov = estimate_primary_mapped_reads(fc_bam, samtools_exec) if collect_coverage else 0
+                    # Summary-based estimate: may overcount supplementary alignments
+                    # (featureCounts --primary does not filter FLAG 0x800). Affects
+                    # coverage sampling depth, not bias direction. See docstring.
+                    mapped_for_cov = primary_mapped_for_coverage(fc_bam, samtools_exec, read_layout) if collect_coverage else 0
                     cov_fraction = coverage_sampling_fraction(mapped_for_cov, gene_body_max_reads)
                     print(
                         f"Gene body coverage sampling ({source_label}): "
@@ -1496,7 +1580,10 @@ def main():
         bams_to_merge = []
         for source_label, fc_bam, fc_strand_mode in fc_outputs:
             processed_bam = fc_bam + ".processed.bam"
-            mapped_for_cov = estimate_primary_mapped_reads(fc_bam, samtools_exec) if collect_coverage else 0
+            # Summary-based estimate: may overcount supplementary alignments
+            # (featureCounts --primary does not filter FLAG 0x800). Affects
+            # coverage sampling depth, not bias direction. See docstring.
+            mapped_for_cov = primary_mapped_for_coverage(fc_bam, samtools_exec, read_layout) if collect_coverage else 0
             cov_fraction = coverage_sampling_fraction(mapped_for_cov, gene_body_max_reads)
             print(
                 f"Gene body coverage sampling ({source_label}): "

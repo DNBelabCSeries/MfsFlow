@@ -140,16 +140,3 @@ def run_barcode_discovery(config, project, analysis_dir):
     log_info(f"Barcode discovery selected: {selected_label}")
     log_info(f"Barcode discovery report: {report_file}")
     log_info(f"Barcode tables updated: {summary_path}")
-
-
-def process_fastq_inputs(_config):
-    """Process FASTQ input files (placeholder for future implementation).
-    
-    Args:
-        _config (dict): Pipeline configuration (unused in current implementation).
-        
-    Returns:
-        None: Placeholder return value.
-    """
-    # The pipeline uses original FASTQ locations directly.
-    return None

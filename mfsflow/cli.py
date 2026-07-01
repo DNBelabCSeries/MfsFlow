@@ -78,7 +78,7 @@ def main(argv=None):
 
     from mfsflow.pipeline_config import build_base_config, resolve_samplesheet_barcodes
     from mfsflow.run_config import write_run_config
-    from mfsflow.bootstrap import create_barcode_tables, create_output_dirs, process_fastq_inputs
+    from mfsflow.bootstrap import create_barcode_tables, create_output_dirs
     from mfsflow.config.validation import require_supported_python, validate_input_files
     from mfsflow.pipeline.runner import run_pipeline_stages
     from mfsflow.runtime import format_duration, log_info
@@ -94,9 +94,6 @@ def main(argv=None):
     log_info('Directories created.')
 
     validate_input_files(config)
-
-    process_fastq_inputs(config)
-    log_info('Fastq processed.')
 
     create_barcode_tables(config)
     log_info('Barcode files created.')

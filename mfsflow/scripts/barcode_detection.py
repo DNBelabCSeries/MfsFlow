@@ -226,7 +226,7 @@ def _hb_process_chunk(cand_chunk):
         if len(cand) != bc_len:
             continue
         if cand in true_set:
-            out.append({'falseBC': cand, 'trueBC': cand, 'hamming': 0})
+            out.append((cand, cand, 0))
             continue
         matches = set()
         for i in range(bc_len):
@@ -235,7 +235,7 @@ def _hb_process_chunk(cand_chunk):
                 matches.add(t)
         if matches:
             for t in matches:
-                out.append({'falseBC': cand, 'trueBC': t, 'hamming': 1})
+                out.append((cand, t, 1))
     return out
 
 def fast_hamming_binning(true_bcs, candidate_bcs, threshold=1, threads=1):
@@ -257,6 +257,7 @@ def fast_hamming_binning(true_bcs, candidate_bcs, threshold=1, threads=1):
     if threshold < 0:
         return pd.DataFrame(), pd.DataFrame()
 
+    mapping_columns = ["falseBC", "trueBC", "hamming"]
     mapping_list = []
 
     if threshold == 0:
@@ -264,8 +265,8 @@ def fast_hamming_binning(true_bcs, candidate_bcs, threshold=1, threads=1):
             if len(cand) != bc_len:
                 continue
             if cand in true_set:
-                mapping_list.append({'falseBC': cand, 'trueBC': cand, 'hamming': 0})
-        raw_df = pd.DataFrame(mapping_list)
+                mapping_list.append((cand, cand, 0))
+        raw_df = pd.DataFrame(mapping_list, columns=mapping_columns)
     elif threshold == 1:
         mask_to_true = collections.defaultdict(list)
         for t in true_set:
@@ -301,7 +302,7 @@ def fast_hamming_binning(true_bcs, candidate_bcs, threshold=1, threads=1):
                 if len(cand) != bc_len:
                     continue
                 if cand in true_set:
-                    mapping_list.append({'falseBC': cand, 'trueBC': cand, 'hamming': 0})
+                    mapping_list.append((cand, cand, 0))
                     continue
                 matches = set()
                 for i in range(bc_len):
@@ -310,8 +311,8 @@ def fast_hamming_binning(true_bcs, candidate_bcs, threshold=1, threads=1):
                         matches.add(t)
                 if matches:
                     for t in matches:
-                        mapping_list.append({'falseBC': cand, 'trueBC': t, 'hamming': 1})
-        raw_df = pd.DataFrame(mapping_list)
+                        mapping_list.append((cand, t, 1))
+        raw_df = pd.DataFrame(mapping_list, columns=mapping_columns)
     else:
         print(f"Warning: BarcodeBinning={threshold} may be slow. Consider using 0 or 1 for performance.")
         true_arr = np.array(sorted(true_set), dtype=object)
@@ -340,8 +341,8 @@ def fast_hamming_binning(true_bcs, candidate_bcs, threshold=1, threads=1):
                         best_matches.append(t)
                 if best <= threshold:
                     for t in best_matches:
-                        mapping_list.append({'falseBC': cand, 'trueBC': t, 'hamming': best})
-        raw_df = pd.DataFrame(mapping_list)
+                        mapping_list.append((cand, t, best))
+        raw_df = pd.DataFrame(mapping_list, columns=mapping_columns)
     
     if raw_df.empty:
         return pd.DataFrame(), pd.DataFrame()

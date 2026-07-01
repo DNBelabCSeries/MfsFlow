@@ -96,6 +96,52 @@ class BarcodeCorrectorTests(unittest.TestCase):
         read = FakeRead(flag=77, seq="AAAA", qual=[30, 30, 30, 30], tags={})
         self.assertIsNone(correct_read_barcode(read, {}, {}, set()))
 
+    def test_unmatched_barcode_clears_existing_cc_cb_tags(self):
+        """Covers the tag-clearing branch: raw_bc not in id_map → well_id is None.
+
+        If the read previously had CC/CB tags (e.g. from a prior correction
+        pass), they must be removed, not left stale.
+        """
+        read = FakeRead(
+            flag=77,
+            seq="CCCCC",
+            qual=[30, 31, 32, 33, 34],
+            tags={"CR": "xxxx", "UR": "UMI", "UY": "III", "CC": "OLD", "CB": "OLD_WELL"},
+        )
+
+        correction = correct_read_barcode(
+            read,
+            bc_map={"XXXX": "YYYY"},  # XXXX corrects to YYYY, but YYYY not in id_map
+            id_map={},
+            internal_bcs=set(),
+        )
+
+        self.assertFalse(correction.is_internal)
+        self.assertIsNone(correction.well_id)
+        self.assertEqual(read.tags["CR"], "XXXX")
+        self.assertNotIn("CC", read.tags)
+        self.assertNotIn("CB", read.tags)
+
+    def test_unmatched_barcode_with_no_prior_tags(self):
+        """Clearing tags that don't exist should not raise."""
+        read = FakeRead(
+            flag=77,
+            seq="CCCCC",
+            qual=[30, 31, 32, 33, 34],
+            tags={"CR": "xxxx", "UR": "UMI", "UY": "III"},
+        )
+
+        correction = correct_read_barcode(
+            read,
+            bc_map={"XXXX": "YYYY"},
+            id_map={},
+            internal_bcs=set(),
+        )
+
+        self.assertIsNone(correction.well_id)
+        self.assertNotIn("CC", read.tags)
+        self.assertNotIn("CB", read.tags)
+
 
 if __name__ == "__main__":
     unittest.main()
