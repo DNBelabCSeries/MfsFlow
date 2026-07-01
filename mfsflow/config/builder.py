@@ -355,3 +355,15 @@ def resolve_samplesheet_barcodes(records, expect_id_file):
         new_row.update(barcode_lookup[barcode])
         resolved.append(new_row)
     return resolved
+
+
+def resolve_samplesheet_fastq_groups(records, expect_id_file, sample_type):
+    """Build FASTQ groups for samplesheet mode.
+
+    In discover mode the barcode can legitimately appear in both manual and
+    auto candidate tables. If discovery has not already narrowed the expected
+    table, keep the user-provided barcode unresolved.
+    """
+    if str(sample_type or "").strip().lower() == "discover":
+        return [dict(row) for row in records]
+    return resolve_samplesheet_barcodes(records, expect_id_file)

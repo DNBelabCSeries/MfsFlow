@@ -4,7 +4,13 @@ import gzip
 import tempfile
 import unittest
 
-from mfsflow.config.builder import configure_reference, discover_fastq_pairs, load_samplesheet, resolve_samplesheet_barcodes
+from mfsflow.config.builder import (
+    configure_reference,
+    discover_fastq_pairs,
+    load_samplesheet,
+    resolve_samplesheet_barcodes,
+    resolve_samplesheet_fastq_groups,
+)
 
 
 class CliInputTests(unittest.TestCase):
@@ -42,6 +48,25 @@ class CliInputTests(unittest.TestCase):
             self.assertEqual(resolved[0]["barcode"], "CCCC")
             self.assertEqual(resolved[0]["wellID"], "P1A1")
             self.assertEqual(resolved[0]["barcode_type"], "umi")
+
+    def test_samplesheet_discover_defers_duplicate_barcode_resolution(self):
+        records = [{
+            "read1": "/tmp/A_R1.fq.gz",
+            "read2": "/tmp/A_R2.fq.gz",
+            "barcode": "CACTCACACGAAGCAGCCGA",
+        }]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            expect = os.path.join(tmpdir, "expect_id_barcode.tsv")
+            with open(expect, "w") as f:
+                f.write("wellID\tumi_barcodes\tinternal_barcodes\n")
+                f.write("MANUAL1\tCACTCACACGAAGCAGCCGA\tAAAA\n")
+                f.write("P1A1\tCACTCACACGAAGCAGCCGA\tTTTT\n")
+
+            resolved = resolve_samplesheet_fastq_groups(records, expect, "discover")
+            self.assertEqual(resolved, records)
+
+            with self.assertRaisesRegex(ValueError, "duplicated"):
+                resolve_samplesheet_fastq_groups(records, expect, "manual")
 
     def test_discover_fastq_pairs_rejects_missing_r2(self):
         with tempfile.TemporaryDirectory() as tmpdir:

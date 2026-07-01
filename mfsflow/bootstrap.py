@@ -10,9 +10,26 @@ import os
 import shutil
 import sys
 
-from mfsflow.barcode_discovery import build_expected_records, discover_barcodes, write_expected_tables
 from mfsflow.logging_utils import log_info, log_error
 from mfsflow.path_layout import barcode_dir, config_dir, ensure_layout, outputs_dir
+
+
+def build_expected_records(*args, **kwargs):
+    from mfsflow.barcode_discovery import build_expected_records as _build_expected_records
+
+    return _build_expected_records(*args, **kwargs)
+
+
+def discover_barcodes(*args, **kwargs):
+    from mfsflow.barcode_discovery import discover_barcodes as _discover_barcodes
+
+    return _discover_barcodes(*args, **kwargs)
+
+
+def write_expected_tables(*args, **kwargs):
+    from mfsflow.barcode_discovery import write_expected_tables as _write_expected_tables
+
+    return _write_expected_tables(*args, **kwargs)
 
 
 def create_output_dirs(config):
@@ -102,16 +119,19 @@ def create_barcode_tables(config):
     config["barcodes"]["barcode_file"] = os.path.join(config_dir(out_path), "expect_barcode.tsv")
 
 
-def run_barcode_discovery(config, project, analysis_dir):
+def run_barcode_discovery(config, project, analysis_dir, assign_barcodes=True):
     """Perform barcode discovery from sequencing data.
-    
+
     Analyzes barcode statistics to identify the most likely sample type
     and sample IDs, updating the configuration accordingly.
-    
+
     Args:
         config (dict): Pipeline configuration to update with discovery results.
         project (str): Project name for file naming.
         analysis_dir (str): Directory containing analysis results.
+    assign_barcodes (bool): When True, overwrite expect_barcode.tsv with
+            discovered barcodes. When False, only set discovered_sample_type
+            (used in samplesheet mode where barcodes are user-provided).
     """
     records = build_expected_records(config.get("toolkit_directory", "."))
     checked = {}
@@ -120,8 +140,9 @@ def run_barcode_discovery(config, project, analysis_dir):
     bcstats_file = os.path.join(analysis_dir, f"{project}.BCstats.txt")
     report_file = os.path.join(barcode_dir(analysis_dir), f"{project}.barcode_discovery.tsv")
     selected, selected_records = discover_barcodes(bcstats_file, records, report_file)
-    pipe_path, summary_path = write_expected_tables(selected_records, config_dir(analysis_dir))
-    config["barcodes"]["barcode_file"] = pipe_path
+    if assign_barcodes:
+        pipe_path, summary_path = write_expected_tables(selected_records, config_dir(analysis_dir))
+        config["barcodes"]["barcode_file"] = pipe_path
     if selected:
         config.setdefault("sample", {})["discovered_sample_type"] = selected[0]["candidate_type"]
         config.setdefault("sample", {})["discovered_sample_ids"] = ",".join(
@@ -139,4 +160,7 @@ def run_barcode_discovery(config, project, analysis_dir):
     log_info(f"Barcode discovery checked candidate sets: {checked_label}")
     log_info(f"Barcode discovery selected: {selected_label}")
     log_info(f"Barcode discovery report: {report_file}")
-    log_info(f"Barcode tables updated: {summary_path}")
+    if assign_barcodes:
+        log_info(f"Barcode tables updated: {summary_path}")
+    else:
+        log_info("Barcode tables preserved (samplesheet mode)")

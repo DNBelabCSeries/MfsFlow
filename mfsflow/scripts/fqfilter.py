@@ -108,12 +108,15 @@ def main():
     import pysam
 
     if len(sys.argv) < 4:
-        print("Usage: python3 fqfilter.py <yaml> <pigz> <tmp_prefix> [--limit N] [--pigz-threads N]")
+        print("Usage: python3 fqfilter.py <yaml> <pigz> <tmp_prefix> [--limit N] [--pigz-threads N] [--direct-fastq] [--group-start N] [--group-end N]")
         sys.exit(1)
 
     args = sys.argv[1:]
     read_limit = 0
     pigz_threads = 1
+    direct_fastq = False
+    group_start = None
+    group_end = None
     if '--limit' in args:
         try:
             idx = args.index('--limit')
@@ -128,6 +131,24 @@ def main():
             args = args[:idx] + args[idx + 2:]
         except Exception:
             pigz_threads = 1
+    if '--direct-fastq' in args:
+        idx = args.index('--direct-fastq')
+        direct_fastq = True
+        args = args[:idx] + args[idx + 1:]
+    if '--group-start' in args:
+        try:
+            idx = args.index('--group-start')
+            group_start = int(args[idx + 1])
+            args = args[:idx] + args[idx + 2:]
+        except Exception:
+            group_start = None
+    if '--group-end' in args:
+        try:
+            idx = args.index('--group-end')
+            group_end = int(args[idx + 1])
+            args = args[:idx] + args[idx + 2:]
+        except Exception:
+            group_end = None
 
     yaml_file = args[0]
     pigz = args[1]
@@ -203,7 +224,9 @@ def main():
         groups = []
         fastq_groups = config.get('fastq_groups') or []
         if fastq_groups:
-            for row in fastq_groups:
+            start = 0 if group_start is None else max(0, group_start)
+            end = len(fastq_groups) if group_end is None else min(len(fastq_groups), group_end)
+            for row in fastq_groups[start:end]:
                 groups.append({
                     'files': [row['read1'], row['read2']],
                     'fixed_bc': row['barcode'].encode('ascii'),
@@ -223,6 +246,15 @@ def main():
         return groups
 
     def open_chunk_handle(f, pigz_procs):
+        if direct_fastq:
+            if f.endswith('.gz'):
+                proc = subprocess.Popen([pigz, '-p', str(pigz_threads), '-dc', f], stdout=subprocess.PIPE, text=False, bufsize=1024*1024)
+                pigz_procs.append(proc)
+                return proc.stdout
+            if os.path.exists(f):
+                return open(f, 'rb')
+            return None
+
         base_name = os.path.basename(f)
         if base_name.endswith('.gz'):
             base_name = base_name[:-3]

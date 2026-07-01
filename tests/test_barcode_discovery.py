@@ -1,7 +1,10 @@
 import os
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
+sys.modules.setdefault("yaml", mock.Mock())
 from mfsflow.barcode_discovery import discover_barcodes, write_expected_tables
 
 
@@ -95,8 +98,8 @@ class BarcodeDiscoveryTests(unittest.TestCase):
                 handle.write("ACGTACGTACGTACGTCCCC\t80\n")
 
             report = os.path.join(tmpdir, "discovery.tsv")
-            selected, _selected_records = discover_barcodes(bcstats, records, report, min_unique_barcodes=1)
-            self.assertIn(("manual", "9"), [(x["candidate_type"], x["candidate_id"]) for x in selected])
+            with self.assertRaisesRegex(ValueError, "could not distinguish manual vs auto"):
+                discover_barcodes(bcstats, records, report, min_unique_barcodes=1)
 
             with open(report) as handle:
                 report_text = handle.read()

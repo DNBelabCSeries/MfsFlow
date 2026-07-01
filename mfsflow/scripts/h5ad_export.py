@@ -130,12 +130,14 @@ def _read_mex(matrix_dir):
 
 
 def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        if value and any(isinstance(v, dict) for v in value):
+            return json.dumps(value, ensure_ascii=False)
+        return [_json_safe(v) for v in value]
     try:
         json.dumps(value)
         return value
     except TypeError:
-        if isinstance(value, dict):
-            return {str(k): _json_safe(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [_json_safe(v) for v in value]
         return str(value)

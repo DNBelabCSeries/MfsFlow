@@ -42,6 +42,16 @@ def estimate_avg_line_len(path, sample_lines=1000):
     return (total / n) if n else 0.0
 
 
+def _make_group_batches(group_count, max_jobs):
+    batch_count = max(1, min(group_count, max_jobs))
+    batch_size = int(math.ceil(group_count / batch_count))
+    batches = []
+    for idx, start in enumerate(range(0, group_count, batch_size)):
+        end = min(group_count, start + batch_size)
+        batches.append((f".group_{idx:03d}", start, end))
+    return batches
+
+
 def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
     config = runtime.config
     project = runtime.project
@@ -67,6 +77,12 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
 
     if not fq1_files:
         raise ValueError("No file1 found in YAML configuration.")
+
+    fastq_groups = config.get("fastq_groups") or []
+    direct_samplesheet_groups = (
+        config.get("barcode_source") == "samplesheet_barcode"
+        and len(fastq_groups) >= max(2, max(1, num_threads // 3))
+    )
 
     total_size_bytes = 0
     first_fq = fq1_files[0]
@@ -95,19 +111,28 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
     log_info(f"Total input estimation: {int(total_lines_est / 4)} reads.")
     log_info(f"Split config: {split_parts} chunk parts, {lines_per_chunk} lines per chunk.")
 
-    with timer.section("Filtering: split FASTQ", f"parts={split_parts};lines_per_chunk={lines_per_chunk};threads={num_threads}"):
-        chunk_suffixes = pipeline_modules.split_fastq(
-            fq1_files,
-            num_threads,
-            lines_per_chunk,
-            tmp_merge_path,
-            project,
-            pigz,
-            seqkit,
-            fq2_files,
-            False,
-            split_parts,
+    direct_group_batches = []
+    if direct_samplesheet_groups:
+        direct_group_batches = _make_group_batches(len(fastq_groups), max(1, num_threads // 3))
+        chunk_suffixes = [suffix for suffix, _start, _end in direct_group_batches]
+        log_info(
+            "Samplesheet direct FASTQ mode: "
+            f"{len(fastq_groups)} FASTQ group(s), {len(direct_group_batches)} fqfilter batch(es); skipping split"
         )
+    else:
+        with timer.section("Filtering: split FASTQ", f"parts={split_parts};lines_per_chunk={lines_per_chunk};threads={num_threads}"):
+            chunk_suffixes = pipeline_modules.split_fastq(
+                fq1_files,
+                num_threads,
+                lines_per_chunk,
+                tmp_merge_path,
+                project,
+                pigz,
+                seqkit,
+                fq2_files,
+                False,
+                split_parts,
+            )
 
     log_info("Running fqfilter.py on chunks")
     max_reads = config.get("counting_opts", {}).get("max_reads", 0)
@@ -127,9 +152,13 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
             if proc.returncode != 0:
                 raise RuntimeError(f"fqfilter failed (rc={proc.returncode}). Check {runtime.log_path} for details.")
 
+        batch_by_suffix = {suffix: (start, end) for suffix, start, end in direct_group_batches}
         for suffix in chunk_suffixes:
             cmd = [python_exec, resolve_script("fqfilter.py"), yaml_file, pigz, suffix]
             cmd.extend(["--pigz-threads", str(fqfilter_pigz_threads)])
+            if direct_samplesheet_groups:
+                start, end = batch_by_suffix[suffix]
+                cmd.extend(["--direct-fastq", "--group-start", str(start), "--group-end", str(end)])
 
             if max_reads and int(max_reads) > 0:
                 chunk_limit = int(int(max_reads) / len(chunk_suffixes))
@@ -175,6 +204,10 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
     expect_id_barcode_file = os.path.join(config_dir(out_dir), "expect_id_barcode.tsv")
 
     if config.get("barcode_source") == "samplesheet_barcode":
+        if config.get("sample", {}).get("sample_type", "").lower() == "discover":
+            log_info("Samplesheet + discover: detecting sample type from injected barcode read counts")
+            with timer.section("Filtering: barcode discovery"):
+                run_barcode_discovery(config, project, analysis_dir)
         log_info("Samplesheet barcode mode: skipping barcode detection/binning")
         bc_bin_for_correction = os.devnull
     else:

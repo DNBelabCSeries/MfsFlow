@@ -91,6 +91,27 @@ def discover_barcodes(bcstats_file, records, out_file, max_hamming=1, min_unique
     observed = _read_bcstats(bcstats_file)
     if not observed:
         raise ValueError(f"No barcode counts found in {bcstats_file}")
+    return discover_barcodes_from_counts(
+        observed,
+        records,
+        out_file,
+        max_hamming=max_hamming,
+        min_unique_barcodes=min_unique_barcodes,
+        min_fraction=min_fraction,
+    )
+
+
+def discover_barcodes_from_counts(
+    observed,
+    records,
+    out_file,
+    max_hamming=1,
+    min_unique_barcodes=2,
+    min_fraction=0.2,
+):
+    """Discover barcode candidates from observed barcode counts."""
+    if not observed:
+        raise ValueError("No barcode counts found")
 
     exact = collections.defaultdict(list)
     masked = collections.defaultdict(list)
@@ -170,6 +191,25 @@ def discover_barcodes(bcstats_file, records, out_file, max_hamming=1, min_unique
 
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
     _write_discovery_report(out_file, summaries, match_rows)
+
+    if summaries:
+        best = summaries[0]
+        top_ties = [
+            row for row in summaries
+            if row["matched_reads"] == best["matched_reads"]
+            and row["matched_expected_barcodes"] == best["matched_expected_barcodes"]
+        ]
+        tied_types = {row["candidate_type"] for row in top_ties}
+        if len(tied_types) > 1:
+            labels = ", ".join(
+                f"{row['candidate_type']}:{row['candidate_id']}"
+                for row in top_ties
+            )
+            raise ValueError(
+                "Barcode discovery could not distinguish manual vs auto candidates. "
+                f"Tied candidates: {labels}. Use --manual or --plate to disambiguate. "
+                f"See discovery report: {out_file}"
+            )
 
     selected = _select_candidates(summaries, min_unique_barcodes, min_fraction)
     if not selected:

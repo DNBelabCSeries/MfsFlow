@@ -80,7 +80,7 @@ def main(argv=None):
     from mfsflow.config import (
         build_base_config,
         require_supported_python,
-        resolve_samplesheet_barcodes,
+        resolve_samplesheet_fastq_groups,
         validate_input_files,
         write_run_config,
     )
@@ -105,7 +105,11 @@ def main(argv=None):
 
     if config.get("barcode_source") == "samplesheet_barcode":
         expect_id_file = os.path.join(config["out_dir"], "config", "expect_id_barcode.tsv")
-        config["fastq_groups"] = resolve_samplesheet_barcodes(samplesheet_records, expect_id_file)
+        config["fastq_groups"] = resolve_samplesheet_fastq_groups(
+            samplesheet_records,
+            expect_id_file,
+            config.get("sample", {}).get("sample_type"),
+        )
 
     final_yaml_path = write_run_config(config)
 

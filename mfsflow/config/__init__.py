@@ -10,6 +10,7 @@ __all__ = [
     "load_samplesheet",
     "require_supported_python",
     "resolve_samplesheet_barcodes",
+    "resolve_samplesheet_fastq_groups",
     "validate_input_files",
     "write_run_config",
 ]
@@ -22,6 +23,7 @@ def __getattr__(name):
         "discover_fastq_pairs",
         "load_samplesheet",
         "resolve_samplesheet_barcodes",
+        "resolve_samplesheet_fastq_groups",
     }:
         builder = import_module("mfsflow.config.builder")
         return getattr(builder, name)
