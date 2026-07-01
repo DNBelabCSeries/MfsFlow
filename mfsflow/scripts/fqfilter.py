@@ -7,15 +7,12 @@ and quality-based filtering.
 """
 
 import sys
-import yaml
 import subprocess
 import re
 import os
 
-import pysam
-
 try:
-    from mfsflow.scripts.path_layout import tmp_merge_dir, load_config
+    from mfsflow.path_layout import tmp_merge_dir, load_config
 except ImportError:
     from path_layout import tmp_merge_dir, load_config
 
@@ -108,6 +105,8 @@ def fastq_iter(handle):
         yield header.rstrip(b'\n\r'), seq, qual
 
 def main():
+    import pysam
+
     if len(sys.argv) < 4:
         print("Usage: python3 fqfilter.py <yaml> <pigz> <tmp_prefix> [--limit N] [--pigz-threads N]")
         sys.exit(1)

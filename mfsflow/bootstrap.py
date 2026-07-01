@@ -11,7 +11,7 @@ import shutil
 import sys
 
 from mfsflow.barcode_discovery import build_expected_records, discover_barcodes, write_expected_tables
-from mfsflow.runtime import log_info, log_error
+from mfsflow.logging_utils import log_info, log_error
 from mfsflow.path_layout import barcode_dir, config_dir, ensure_layout, outputs_dir
 
 

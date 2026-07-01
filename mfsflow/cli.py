@@ -44,10 +44,10 @@ def generate_report(config, analysis_failed=False):
             settings and output directory paths.
     """
     from mfsflow.path_layout import logs_dir
-    from mfsflow.runtime import PipelineTimer
+    from mfsflow.timer import PipelineTimer
 
     from mfsflow import report
-    from mfsflow.runtime import log_info
+    from mfsflow.logging_utils import log_info
 
     log_info('Generating HTML Report...')
     report_config = dict(config)
@@ -76,12 +76,17 @@ def main(argv=None):
     import time
     from pathlib import Path
 
-    from mfsflow.pipeline_config import build_base_config, resolve_samplesheet_barcodes
-    from mfsflow.run_config import write_run_config
     from mfsflow.bootstrap import create_barcode_tables, create_output_dirs
-    from mfsflow.config.validation import require_supported_python, validate_input_files
+    from mfsflow.config import (
+        build_base_config,
+        require_supported_python,
+        resolve_samplesheet_barcodes,
+        validate_input_files,
+        write_run_config,
+    )
     from mfsflow.pipeline.runner import run_pipeline_stages
-    from mfsflow.runtime import format_duration, log_info
+    from mfsflow.logging_utils import log_info
+    from mfsflow.timer import format_duration
 
     require_supported_python()
 
@@ -111,7 +116,7 @@ def main(argv=None):
     try:
         run_pipeline_stages(final_yaml_path)
     except Exception:
-        from mfsflow.runtime import log_error
+        from mfsflow.logging_utils import log_error
 
         pipeline_duration = time.perf_counter() - pipeline_start
         log_error(

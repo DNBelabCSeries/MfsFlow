@@ -14,7 +14,7 @@ import glob
 import logging
 import os
 
-from mfsflow import constant
+from mfsflow.config.defaults import DEFAULT_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def build_base_config(args, script_dir):
     Returns:
         tuple: (config_dict, samplesheet_records).
     """
-    config = copy.deepcopy(constant.DEFAULT_CONFIG)
+    config = copy.deepcopy(DEFAULT_CONFIG)
     config["project"] = args.sample
     config["num_threads"] = args.threads
     config["toolkit_directory"] = script_dir

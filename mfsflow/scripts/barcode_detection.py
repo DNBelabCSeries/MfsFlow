@@ -8,7 +8,6 @@ quality assessment of single-cell experiments.
 """
 
 import argparse
-import yaml
 import pandas as pd
 import numpy as np
 import os
@@ -18,7 +17,7 @@ import collections
 import multiprocessing as mp
 
 try:
-    from mfsflow.scripts.path_layout import barcode_dir, load_config
+    from mfsflow.path_layout import barcode_dir, load_config
 except ImportError:
     from path_layout import barcode_dir, load_config
 

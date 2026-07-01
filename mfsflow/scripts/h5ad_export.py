@@ -11,7 +11,7 @@ import json
 import os
 
 try:
-    from mfsflow.scripts.path_layout import expression_dir
+    from mfsflow.path_layout import expression_dir
 except ImportError:
     from path_layout import expression_dir
 

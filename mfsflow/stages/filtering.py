@@ -13,8 +13,9 @@ import math
 import os
 import subprocess
 
+from mfsflow import pipeline_modules
 from mfsflow.bootstrap import run_barcode_discovery
-from mfsflow.runtime import log_info
+from mfsflow.logging_utils import log_info
 from mfsflow.path_layout import barcode_dir, config_dir
 
 
@@ -55,8 +56,6 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
     tmp_merge_path = runtime.tmp_merge_path
     yaml_file = runtime.yaml_file
     resolve_script = runtime.resolve_script
-
-    from mfsflow import pipeline_modules
 
     log_info("Starting Filtering Stage")
 

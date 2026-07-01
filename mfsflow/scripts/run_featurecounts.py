@@ -9,7 +9,6 @@ statistical analysis for single-cell RNA sequencing data.
 
 import sys
 import os
-import yaml
 import subprocess
 import csv
 import shutil
@@ -21,7 +20,7 @@ import hashlib
 from functools import lru_cache
 
 try:
-    from mfsflow.scripts.path_layout import expression_dir, stats_dir, load_config
+    from mfsflow.path_layout import expression_dir, stats_dir, load_config
 except ImportError:
     from path_layout import expression_dir, stats_dir, load_config
 

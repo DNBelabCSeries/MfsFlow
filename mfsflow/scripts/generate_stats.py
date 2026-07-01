@@ -9,14 +9,13 @@ and gene expression statistics.
 
 import sys
 import os
-import yaml
 import collections
 import gzip
 import json
 import numpy as np
 
 try:
-    from mfsflow.scripts.path_layout import config_dir, expression_dir, stats_dir, load_config
+    from mfsflow.path_layout import config_dir, expression_dir, stats_dir, load_config
 except ImportError:
     from path_layout import config_dir, expression_dir, stats_dir, load_config
 

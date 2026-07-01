@@ -4,9 +4,10 @@ import tempfile
 import unittest
 
 from mfsflow.cli import build_parser
-from mfsflow.runtime import PipelineRuntime, format_duration
+from mfsflow.runtime import PipelineRuntime
 from mfsflow.stages import COUNTING, FILTERING, MAPPING, STAGE_ORDER, SUMMARISING
 from mfsflow.report import _select_report_template
+from mfsflow.timer import format_duration
 
 
 class MfsflowPackageTests(unittest.TestCase):
@@ -43,6 +44,19 @@ class MfsflowPackageTests(unittest.TestCase):
             self.assertEqual(runtime.num_threads, 4)
             self.assertTrue(runtime.log_path.endswith("pipeline.log"))
             self.assertTrue(runtime.timing_path.endswith("pipeline_timing.tsv"))
+
+    def test_runtime_accepts_snake_case_stage_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": "P1",
+                "out_dir": os.path.join(tmpdir, "XPRESS_PROCESSING"),
+                "num_threads": 4,
+                "which_stage": MAPPING,
+                "toolkit_directory": tmpdir,
+            }
+            runtime = PipelineRuntime.from_config(config, "/tmp/run_config.yaml")
+
+            self.assertEqual(runtime.which_stage, MAPPING)
 
     def test_duration_formatting(self):
         self.assertEqual(format_duration(12.345), "12.35s")

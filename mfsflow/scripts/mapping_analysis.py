@@ -11,7 +11,6 @@ import sys
 import os
 import glob
 import subprocess
-import yaml
 import math
 import shutil
 import collections
@@ -20,7 +19,7 @@ import gzip
 import sys
 
 try:
-    from mfsflow.scripts.path_layout import barcode_dir, load_config
+    from mfsflow.path_layout import barcode_dir, load_config
 except ImportError:
     from path_layout import barcode_dir, load_config
 

@@ -8,7 +8,8 @@ metrics for the completed analysis.
 
 import os
 
-from mfsflow.runtime import remove_path, log_info
+from mfsflow.fs_utils import remove_path
+from mfsflow.logging_utils import log_info
 
 
 def run_statistics_stage(runtime, run_stage_cmd):

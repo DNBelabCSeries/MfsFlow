@@ -8,7 +8,8 @@ genome using STAR, producing aligned BAM files for downstream counting.
 
 import glob
 import os
-from mfsflow.runtime import log_info
+
+from mfsflow.logging_utils import log_info
 
 
 def run_mapping_stage(runtime, run_stage_cmd, umi_chunks=None, int_chunks=None):

@@ -9,7 +9,6 @@ RNA sequencing data processing.
 
 import sys
 import os
-import yaml
 import subprocess
 import csv
 import gzip
@@ -31,7 +30,7 @@ except ImportError:
 try:
     from mfsflow.scripts.umi_utils import cluster_umis
     from mfsflow.scripts.h5ad_export import export_h5ad
-    from mfsflow.scripts.path_layout import barcode_dir, expression_dir, stats_dir, load_config
+    from mfsflow.path_layout import barcode_dir, expression_dir, stats_dir, load_config
 except ImportError:
     from umi_utils import cluster_umis
     from h5ad_export import export_h5ad

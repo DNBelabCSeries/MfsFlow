@@ -135,3 +135,11 @@ def ensure_layout(out_dir):
         outputs_dir(out_dir),
     ):
         os.makedirs(path, exist_ok=True)
+
+
+def load_config(yaml_file):
+    """Load a YAML configuration file."""
+    import yaml
+
+    with open(yaml_file, "r") as handle:
+        return yaml.safe_load(handle)

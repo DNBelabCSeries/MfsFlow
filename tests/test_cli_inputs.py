@@ -4,7 +4,7 @@ import gzip
 import tempfile
 import unittest
 
-from mfsflow.pipeline_config import configure_reference, discover_fastq_pairs, load_samplesheet, resolve_samplesheet_barcodes
+from mfsflow.config.builder import configure_reference, discover_fastq_pairs, load_samplesheet, resolve_samplesheet_barcodes
 
 
 class CliInputTests(unittest.TestCase):

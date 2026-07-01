@@ -12,14 +12,17 @@ import sys
 
 import yaml
 
-from mfsflow.runtime import PipelineRuntime, PipelineTimer, Tee, run_stage_cmd as run_timed_stage_cmd, log_info
+from mfsflow.commands import run_stage_cmd as run_timed_stage_cmd
+from mfsflow.logging_utils import Tee, log_info
 from mfsflow.preflight import run_preflight
+from mfsflow.runtime import PipelineRuntime
 from mfsflow.stage_state import invalidate_stage_success, record_stage_success
 from mfsflow.stages import COUNTING, FILTERING, MAPPING, STAGE_ORDER, SUMMARISING
 from mfsflow.stages.counting import run_counting_stage
 from mfsflow.stages.filtering import run_filtering_stage
 from mfsflow.stages.mapping import run_mapping_stage
 from mfsflow.stages.statistics import run_statistics_stage
+from mfsflow.timer import PipelineTimer
 
 
 def run_pipeline_stages(yaml_file):
@@ -65,6 +68,9 @@ def run_pipeline_stages(yaml_file):
             def run_stage_cmd(cmd, stage_name, shell=False):
                 run_timed_stage_cmd(cmd, stage_name, run_log, exec_env, timer, log_path, shell=shell)
 
+            umi_chunks = None
+            int_chunks = None
+
             if which_stage == "Filtering":
                 umi_chunks, int_chunks = run_filtering_stage(runtime, timer, run_stage_cmd, run_log)
                 manifest = record_stage_success(runtime, FILTERING)
@@ -74,8 +80,8 @@ def run_pipeline_stages(yaml_file):
                 run_mapping_stage(
                     runtime,
                     run_stage_cmd,
-                    umi_chunks=locals().get("umi_chunks"),
-                    int_chunks=locals().get("int_chunks"),
+                    umi_chunks=umi_chunks,
+                    int_chunks=int_chunks,
                 )
                 manifest = record_stage_success(runtime, MAPPING)
                 log_info(f"Mapping artifact manifest: {manifest}")

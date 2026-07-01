@@ -2,10 +2,20 @@ import os
 import sys
 import unittest
 
-from mfsflow.scripts.fqfilter import extract_seq, hamming_distance
+from mfsflow.scripts.fqfilter import extract_seq, hamming_distance, parse_definition
 
 
 class FqfilterLogicTests(unittest.TestCase):
+    def test_parse_definition_supports_multiple_ranges(self):
+        self.assertEqual(
+            parse_definition("BC(1-4,9-10);UMI(5-8);cDNA(11-20)"),
+            {
+                "BC": [(0, 4), (8, 10)],
+                "UMI": [(4, 8)],
+                "cDNA": [(10, 20)],
+            },
+        )
+
     def test_smartseq3_no_pattern_keeps_full_read_as_cdna(self):
         definition = {
             "UMI": [(0, 10)],

@@ -1,68 +1,23 @@
-"""
-Directory layout helpers for organizing pipeline output directories.
-
-This is a standalone copy of mfsflow.path_layout for use by pipeline scripts
-executed as separate processes. Provides the same directory path construction
-functions used throughout the pipeline.
-"""
+"""Bootstrap access to mfsflow.path_layout for direct script execution."""
 
 import os
-import yaml
+import sys
 
 
-def config_dir(out_dir):
-    return os.path.join(out_dir, "config")
+_PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _PACKAGE_ROOT)
 
-
-def logs_dir(out_dir):
-    return os.path.join(out_dir, "logs")
-
-
-def stage_state_dir(out_dir):
-    return os.path.join(logs_dir(out_dir), "stages")
-
-
-def barcode_dir(out_dir):
-    return os.path.join(out_dir, "barcodes")
-
-
-def expression_dir(out_dir):
-    return os.path.join(out_dir, "expression")
-
-
-def stats_dir(out_dir):
-    return os.path.join(out_dir, "stats")
-
-
-def intermediate_dir(out_dir):
-    return os.path.join(out_dir, "intermediate")
-
-
-def tmp_merge_dir(out_dir):
-    return os.path.join(intermediate_dir(out_dir), "tmp_merge")
-
-
-def outputs_dir(out_dir):
-    return os.path.join(os.path.dirname(out_dir), "outs")
-
-
-def ensure_layout(out_dir):
-    for path in (
-        out_dir,
-        config_dir(out_dir),
-        logs_dir(out_dir),
-        stage_state_dir(out_dir),
-        barcode_dir(out_dir),
-        expression_dir(out_dir),
-        stats_dir(out_dir),
-        intermediate_dir(out_dir),
-        tmp_merge_dir(out_dir),
-        outputs_dir(out_dir),
-    ):
-        os.makedirs(path, exist_ok=True)
-
-
-def load_config(yaml_file):
-    """Load configuration from YAML file."""
-    with open(yaml_file, 'r') as f:
-        return yaml.safe_load(f)
+from mfsflow.path_layout import (  # noqa: E402,F401
+    barcode_dir,
+    config_dir,
+    ensure_layout,
+    expression_dir,
+    intermediate_dir,
+    load_config,
+    logs_dir,
+    outputs_dir,
+    stage_state_dir,
+    stats_dir,
+    tmp_merge_dir,
+)
