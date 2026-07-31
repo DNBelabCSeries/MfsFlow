@@ -845,7 +845,7 @@ ${plotly_loader_tag}
                         <th>UMIs</th>
                         <th>Mapping ratio</th>
                         <th>UMI fraction</th>
-                        <th>Exon/Intron ratio</th>
+                        <th>Exon + intron ratio</th>
                         <th>Active</th>
                     </tr>
                 </thead>
@@ -894,7 +894,7 @@ ${plotly_loader_tag}
                         Metric
                         <select id="metric-y">
                             <option value="mappingratio">Mapping ratio</option>
-                            <option value="exonintronratio">Exon/Intron ratio</option>
+                            <option value="genicratio">Exon + intron ratio</option>
                             <option value="umifrac">UMI fraction</option>
                             <option value="umis">UMIs</option>
                             <option value="genes">Genes (UMIs)</option>
@@ -1053,9 +1053,9 @@ ${plotly_loader_tag}
         const mapping = num(row.MappingRatio);
         const genes = metricValue(row, 'genes');
         const reads = metricValue(row, 'allreads');
-        const exInRatio = ratio === undefined ? metricValue(row, 'exonintronratio') : ratio;
-        if ((mapping !== null && mapping < 0.35) || (exInRatio !== null && exInRatio < 0.35)) return 'warn-row';
-        if ((mapping !== null && mapping < 0.55) || (exInRatio !== null && exInRatio < 0.5) || (genes !== null && genes < 500) || (reads !== null && reads < 1000)) return 'review-row';
+        const genicRatio = ratio === undefined ? metricValue(row, 'genicratio') : ratio;
+        if ((mapping !== null && mapping < 0.35) || (genicRatio !== null && genicRatio < 0.35)) return 'warn-row';
+        if ((mapping !== null && mapping < 0.55) || (genicRatio !== null && genicRatio < 0.5) || (genes !== null && genes < 500) || (reads !== null && reads < 1000)) return 'review-row';
         return '';
     }
     function metricValue(row, metric) {
@@ -1068,7 +1068,13 @@ ${plotly_loader_tag}
         if (metric === 'umis') return num(row.Intron_Exon_umis) ?? num(row.Exon_umis);
         if (metric === 'mappingratio') return num(row.MappingRatio);
         if (metric === 'umifrac') return num(row.UMIfrac);
-        if (metric === 'exonintronratio') return num(row.ExonIntronRatio);
+        if (metric === 'genicratio') {
+            const ex = num(row.Exon_reads);
+            const intr = num(row.intron_reads) ?? num(row.Intron_reads);
+            if (ex === null && intr === null) return null;
+            const ar = metricValue(row, 'allreads');
+            return (ar && ar > 0) ? ((ex ?? 0) + (intr ?? 0)) / ar : null;
+        }
         return null;
     }
     function usedReads(row) {
@@ -1112,9 +1118,7 @@ ${plotly_loader_tag}
         body.innerHTML = '';
         manualRows.forEach(function(row) {
             const allReads = num(row.all_reads);
-            const exon = num(row.Exon_reads) || 0;
-            const intron = num(row.intron_reads) ?? num(row.Intron_reads) ?? 0;
-            const inExRatio = (allReads && allReads > 0) ? (exon + intron) / allReads : null;
+            const genicRatio = metricValue(row, 'genicratio');
             const isActive = (allReads || 0) > 0;
             const tr = document.createElement('tr');
             const vals = [
@@ -1125,10 +1129,10 @@ ${plotly_loader_tag}
                 fmtInt(row.umis),
                 fmtPct(row.mapping_ratio),
                 fmtPct(num(row.UMIfrac) ?? num(row.umi_fraction)),
-                fmtPct(inExRatio),
+                fmtPct(genicRatio),
                 isActive ? 'Yes' : 'No'
             ];
-            tr.className = rowClass(row, inExRatio);
+            tr.className = rowClass(row, genicRatio);
             vals.forEach(function(v, i) {
                 const td = document.createElement('td');
                 if (i > 0 && i < 8) td.className = 'numeric';
@@ -1159,7 +1163,7 @@ ${plotly_loader_tag}
         }
         function metricLabel(metric) {
             if (metric === 'mappingratio') return 'Mapping ratio';
-            if (metric === 'exonintronratio') return 'Exon/Intron ratio';
+            if (metric === 'genicratio') return 'Exon + intron ratio';
             if (metric === 'umifrac') return 'UMI fraction';
             if (metric === 'umis') return 'UMIs';
             if (metric === 'genes') return 'Genes (UMIs)';
@@ -1363,24 +1367,21 @@ ${plotly_loader_tag}
         const count = el('stats-count');
         const pagination = el('pagination');
 
-        const cols = ['wellID', 'umi_reads', 'internal_reads', 'MappingRatio', 'InExOverAll', 'UMIfrac', 'Intron_Exon_genes', 'Intron_Exon_umis'];
+        const cols = ['wellID', 'umi_reads', 'internal_reads', 'MappingRatio', 'GenicRatio', 'UMIfrac', 'Intron_Exon_genes', 'Intron_Exon_umis'];
         const colNames = {
             'wellID': 'Sample',
             'umi_reads': 'UMI Reads',
             'internal_reads': 'Internal Reads',
             'MappingRatio': 'Mapping Ratio',
-            'InExOverAll': 'Exon/Intron ratio',
+            'GenicRatio': 'Exon + intron ratio',
             'UMIfrac': 'UMI Fraction',
             'Intron_Exon_genes': 'Intron/Exon Genes',
             'Intron_Exon_umis': 'Intron/Exon UMIs'
         };
 
         const statsWithDerived = stats.map(function(row) {
-            const allReads = usedReads(row);
-            const exon = num(row.Exon_reads) || 0;
-            const intron = num(row.intron_reads) ?? num(row.Intron_reads) ?? 0;
-            const ratio = (allReads && allReads > 0) ? (exon + intron) / allReads : null;
-            return Object.assign({}, row, { InExOverAll: ratio });
+            const ratio = metricValue(row, 'genicratio');
+            return Object.assign({}, row, { GenicRatio: ratio });
         });
         let currentRows = [...statsWithDerived];
         let sortCol = null;
@@ -1408,7 +1409,7 @@ ${plotly_loader_tag}
             let bodyHtml = '<tbody>' + pageRows.map(function(row) {
                 return '<tr>' + cols.map(function(c) {
                     const numeric = c !== 'wellID';
-                    const v = (c === 'MappingRatio' || c === 'UMIfrac' || c === 'InExOverAll') ? fmtPct(row[c]) : (numeric ? fmtInt(row[c]) : String(row[c] || ''));
+                    const v = (c === 'MappingRatio' || c === 'UMIfrac' || c === 'GenicRatio') ? fmtPct(row[c]) : (numeric ? fmtInt(row[c]) : String(row[c] || ''));
                     return '<td class="' + (numeric ? 'numeric' : '') + '">' + v + '</td>';
                 }).join('') + '</tr>';
             }).join('') + '</tbody>';

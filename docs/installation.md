@@ -2,7 +2,7 @@
 
 ## System Requirements
 
-**Minimum**: Linux (Ubuntu 18.04+/CentOS 7+) or macOS (10.14+), 4 cores, 16GB RAM, 50GB storage, Python 3.8+
+**Minimum**: Linux (Ubuntu 18.04+/CentOS 7+) for the bundled production tools, 4 cores, 16GB RAM, 50GB storage, Python 3.8+
 
 **Recommended**: 20+ cores, 64+ GB RAM, 200+ GB SSD, Python 3.9+
 
@@ -25,7 +25,10 @@ pip install .
 mfsflow --help
 ```
 
-**Note**: MfsFlow comes with bundled bioinformatics tools (STAR, Samtools, Pigz, Seqkit, FeatureCounts) in `mfsflow/software/` (inside the installed package). **No manual installation required**.
+**Note**: MfsFlow bundles Linux bioinformatics tools (STAR, Samtools, Pigz, Seqkit, FeatureCounts) in `mfsflow/software/` and prepends them automatically on Linux. On macOS, install compatible versions of these tools separately and ensure they are available on `PATH`; the bundled Linux executables are not used.
+
+For production runs, use Linux. macOS is suitable for development and tests
+when the external tools and their native dependencies are installed.
 
 ---
 

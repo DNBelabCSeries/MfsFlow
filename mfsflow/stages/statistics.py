@@ -27,5 +27,10 @@ def run_statistics_stage(runtime, run_stage_cmd):
     stats_cmd = [runtime.python_exec, runtime.resolve_script("generate_stats.py"), runtime.yaml_file]
     run_stage_cmd(stats_cmd, "Stats (Python)")
 
+def cleanup_statistics_inputs(runtime):
+    """Remove the Counting-only GeneTagged BAM after Summarising succeeds."""
     gene_tagged_bam = os.path.join(runtime.analysis_dir, f"{runtime.project}.filtered.Aligned.GeneTagged.bam")
-    remove_path(gene_tagged_bam)
+    try:
+        remove_path(gene_tagged_bam)
+    except OSError as exc:
+        log_info(f"Warning: could not remove Statistics input {gene_tagged_bam}: {exc}")

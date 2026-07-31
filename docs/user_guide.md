@@ -378,15 +378,13 @@ MfsFlow generates two types of HTML reports:
 
 For advanced configuration options, see the [Configuration Reference](configuration.md).
 
-### Using YAML Configuration File
+### Using the Generated YAML Configuration
 
-Instead of command-line arguments, you can use a YAML configuration file:
-
-```bash
-mfsflow --config /path/to/config.yaml
-```
-
-See `mfsflow/yaml/example_config.yaml` (in source repo) for a complete example.
+MfsFlow writes the complete run configuration to
+`XPRESS_PROCESSING/config/run_config.yaml` before execution. Use the normal
+CLI arguments to create a run; the generated YAML preserves the exact paths
+and options used for that run. The current CLI does not accept a separate
+`--config` argument.
 
 ### Performance Optimization
 

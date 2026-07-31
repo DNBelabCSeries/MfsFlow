@@ -10,6 +10,8 @@ import argparse
 import os
 import sys
 
+from mfsflow import __version__
+from mfsflow.run_lock import OutputRunLock
 from mfsflow.stages import FILTERING, STAGE_ORDER
 
 
@@ -20,6 +22,7 @@ def build_parser():
         argparse.ArgumentParser: Configured argument parser.
     """
     parser = argparse.ArgumentParser(description="MfsFlow Data Analysis Pipeline")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--fastqs", required=True, help="Directory containing input R1/R2 FASTQ files")
     parser.add_argument("--samplesheet", help="CSV samplesheet for equal-length R1/R2 data")
     parser.add_argument("--genomeDir", required=True, help="Reference directory containing star/ and genes/genes.gtf or genes.gtf.gz")
@@ -67,26 +70,16 @@ def main(argv=None):
     Args:
         argv (list, optional): Command-line arguments. Defaults to sys.argv.
     """
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.threads < 1:
+        parser.error("--threads must be >= 1")
 
-    from mfsflow.preflight import check_python_dependencies
-
-    check_python_dependencies()
-
-    import time
     from pathlib import Path
 
-    from mfsflow.bootstrap import create_barcode_tables, create_output_dirs
-    from mfsflow.config import (
-        build_base_config,
-        require_supported_python,
-        resolve_samplesheet_fastq_groups,
-        validate_input_files,
-        write_run_config,
-    )
-    from mfsflow.pipeline.runner import run_pipeline_stages
+    from mfsflow.bootstrap import create_output_dirs
+    from mfsflow.config import build_base_config, require_supported_python
     from mfsflow.logging_utils import log_info
-    from mfsflow.timer import format_duration
 
     require_supported_python()
 
@@ -98,7 +91,23 @@ def main(argv=None):
     create_output_dirs(config)
     log_info('Directories created.')
 
+    with OutputRunLock(config["out_dir"]):
+        _run_analysis(config, samplesheet_records)
+
+
+def _run_analysis(config, samplesheet_records):
+    """Run setup, pipeline stages, and report generation under the output lock."""
+    import time
+
+    from mfsflow.bootstrap import create_barcode_tables
+    from mfsflow.config import resolve_samplesheet_fastq_groups, validate_input_files, write_run_config
+    from mfsflow.logging_utils import log_error, log_info
+    from mfsflow.preflight import check_python_dependencies
+    from mfsflow.pipeline.runner import run_pipeline_stages
+    from mfsflow.timer import format_duration
+
     validate_input_files(config)
+    check_python_dependencies(config=config)
 
     create_barcode_tables(config)
     log_info('Barcode files created.')
@@ -120,8 +129,6 @@ def main(argv=None):
     try:
         run_pipeline_stages(final_yaml_path)
     except Exception:
-        from mfsflow.logging_utils import log_error
-
         pipeline_duration = time.perf_counter() - pipeline_start
         log_error(
             f'Analysis failed after {format_duration(pipeline_duration)}. '

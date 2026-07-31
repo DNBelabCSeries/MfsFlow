@@ -9,6 +9,7 @@ genome using STAR, producing aligned BAM files for downstream counting.
 import glob
 import os
 
+from mfsflow.fs_utils import remove_path
 from mfsflow.logging_utils import log_info
 
 
@@ -94,11 +95,12 @@ def run_mapping_stage(runtime, run_stage_cmd, umi_chunks=None, int_chunks=None):
     expect_id_file = os.path.join(out_dir, "config", "expect_id_barcode.tsv")
     map_cmd.extend(["--expect_id_file", expect_id_file])
     run_stage_cmd(map_cmd, "mapping_analysis.py")
+    return umi_chunks, int_chunks
 
-    for path in umi_chunks:
-        if os.path.exists(path):
-            os.remove(path)
-
-    for path in int_chunks:
-        if os.path.exists(path):
-            os.remove(path)
+def cleanup_mapping_inputs(umi_chunks=None, int_chunks=None):
+    """Remove Filtering inputs only after Mapping has been marked successful."""
+    for path in set((umi_chunks or []) + (int_chunks or [])):
+        try:
+            remove_path(path)
+        except OSError as exc:
+            log_info(f"Warning: could not remove Mapping input {path}: {exc}")

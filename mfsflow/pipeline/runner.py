@@ -18,10 +18,10 @@ from mfsflow.preflight import run_preflight
 from mfsflow.runtime import PipelineRuntime
 from mfsflow.stage_state import invalidate_stage_success, record_stage_success
 from mfsflow.stages import COUNTING, FILTERING, MAPPING, STAGE_ORDER, SUMMARISING
-from mfsflow.stages.counting import run_counting_stage
+from mfsflow.stages.counting import cleanup_counting_inputs, run_counting_stage
 from mfsflow.stages.filtering import run_filtering_stage
-from mfsflow.stages.mapping import run_mapping_stage
-from mfsflow.stages.statistics import run_statistics_stage
+from mfsflow.stages.mapping import cleanup_mapping_inputs, run_mapping_stage
+from mfsflow.stages.statistics import cleanup_statistics_inputs, run_statistics_stage
 from mfsflow.timer import PipelineTimer
 
 
@@ -77,7 +77,7 @@ def run_pipeline_stages(yaml_file):
                 log_info(f"Filtering artifact manifest: {manifest}")
 
             if which_stage in ["Filtering", "Mapping"]:
-                run_mapping_stage(
+                mapping_umi_chunks, mapping_int_chunks = run_mapping_stage(
                     runtime,
                     run_stage_cmd,
                     umi_chunks=umi_chunks,
@@ -85,6 +85,7 @@ def run_pipeline_stages(yaml_file):
                 )
                 manifest = record_stage_success(runtime, MAPPING)
                 log_info(f"Mapping artifact manifest: {manifest}")
+                cleanup_mapping_inputs(mapping_umi_chunks, mapping_int_chunks)
 
             if which_stage in ["Filtering", "Mapping", "Counting"]:
                 run_counting_stage(runtime, run_stage_cmd)
@@ -95,6 +96,11 @@ def run_pipeline_stages(yaml_file):
                 run_statistics_stage(runtime, run_stage_cmd)
                 manifest = record_stage_success(runtime, SUMMARISING)
                 log_info(f"Summarising artifact manifest: {manifest}")
+                # Counting inputs (Mapping BAMs) are only removed once the full
+                # pipeline has reached Summarising, so Counting can still be
+                # resumed before the run is fully complete.
+                cleanup_counting_inputs(runtime)
+                cleanup_statistics_inputs(runtime)
 
             log_info("Pipeline Finished Successfully.")
         finally:

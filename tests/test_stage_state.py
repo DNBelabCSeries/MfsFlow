@@ -2,11 +2,18 @@ import json
 import os
 import tempfile
 import unittest
+import importlib.util
 from types import SimpleNamespace
 from unittest import mock
 
 from mfsflow.path_layout import stage_state_dir
-from mfsflow.stage_state import _quickcheck_bams, invalidate_stage_success, record_stage_success
+from mfsflow.stage_state import (
+    _quickcheck_bams,
+    _validate_gzip,
+    invalidate_stage_success,
+    record_stage_success,
+    validate_stage_manifest,
+)
 from mfsflow.stages import FILTERING, MAPPING
 
 
@@ -33,6 +40,7 @@ class StageStateTests(unittest.TestCase):
         )
 
     @staticmethod
+    @unittest.skipUnless(importlib.util.find_spec("pysam"), "pysam is not installed")
     def _write_no_sq_bam(path):
         """Write a valid BAM whose header has no @SQ lines (mimics fqfilter output)."""
         import pysam
@@ -111,6 +119,108 @@ class StageStateTests(unittest.TestCase):
             open(os.path.join(tmpdir, "sample.filtered.tagged.umi.Aligned.out.bam"), "wb").close()
             with self.assertRaisesRegex(RuntimeError, "missing or empty"):
                 record_stage_success(runtime, MAPPING)
+
+    def test_manifest_validation_rejects_changed_artifact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            bam = os.path.join(tmpdir, "sample.filtered.tagged.umi.Aligned.out.bam")
+            with open(bam, "wb") as handle:
+                handle.write(b"BAM")
+
+            with mock.patch("mfsflow.stage_state._quickcheck_bams"):
+                record_stage_success(runtime, MAPPING)
+                with open(bam, "ab") as handle:
+                    handle.write(b"changed")
+                with self.assertRaisesRegex(RuntimeError, "size changed"):
+                    validate_stage_manifest(runtime, MAPPING)
+
+    def test_manifest_validation_missing_artifact_advises_rerun_from_filtering(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            bam = os.path.join(tmpdir, "sample.filtered.tagged.umi.Aligned.out.bam")
+            with open(bam, "wb") as handle:
+                handle.write(b"BAM")
+
+            with mock.patch("mfsflow.stage_state._quickcheck_bams"):
+                record_stage_success(runtime, MAPPING)
+                os.remove(bam)
+                with self.assertRaisesRegex(RuntimeError, "missing or empty"):
+                    validate_stage_manifest(runtime, MAPPING)
+
+    def test_manifest_validation_allows_resume_stage_change(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            runtime.config["which_Stage"] = "Filtering"
+            bam = os.path.join(tmpdir, "sample.filtered.tagged.umi.Aligned.out.bam")
+            with open(bam, "wb") as handle:
+                handle.write(b"BAM")
+
+            with mock.patch("mfsflow.stage_state._quickcheck_bams"):
+                record_stage_success(runtime, MAPPING)
+                runtime.config["which_Stage"] = "Mapping"
+                validate_stage_manifest(runtime, MAPPING)
+
+    def test_manifest_validation_accepts_stats_disabled_noop(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            runtime.config["make_stats"] = False
+            with mock.patch("mfsflow.stage_state.stage_artifacts", return_value=[]):
+                record_stage_success(runtime, "Summarising")
+                payload = validate_stage_manifest(runtime, "Summarising")
+            self.assertEqual(payload["artifacts"], [])
+
+    def test_validate_gzip_accepts_valid_small_file(self):
+        import gzip
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "valid.mtx.gz")
+            with gzip.open(path, "wt") as handle:
+                handle.write("1 2 3\n")
+            _validate_gzip(path, "matrix")  # should not raise
+
+    def test_validate_gzip_rejects_empty_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "empty.mtx.gz")
+            open(path, "wb").close()
+            with self.assertRaisesRegex(RuntimeError, "empty"):
+                _validate_gzip(path, "matrix")
+
+    def test_validate_gzip_rejects_non_gzip(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "bad.mtx.gz")
+            with open(path, "wb") as handle:
+                handle.write(b"not gzip")
+            with self.assertRaisesRegex(RuntimeError, "corrupt or unreadable"):
+                _validate_gzip(path, "matrix")
+
+    def test_validate_gzip_large_file_light_check_only_samples(self):
+        import gzip
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "big.mtx.gz")
+            with gzip.open(path, "wb") as handle:
+                handle.write(b"x" * 4096)
+            # Force the large-file branch by shrinking the full-check threshold,
+            # then assert the file is still accepted.
+            with mock.patch("mfsflow.stage_state._GZIP_FULL_CHECK_MAX_BYTES", 64):
+                _validate_gzip(path, "matrix", full_check=False)  # should not raise
+
+    def test_validate_gzip_full_check_rejects_truncated_large_file(self):
+        import gzip
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "truncated.mtx.gz")
+            with gzip.open(path, "wb") as handle:
+                handle.write(os.urandom(4096))
+            with open(path, "rb") as handle:
+                data = handle.read()
+            with open(path, "wb") as handle:
+                handle.write(data[:-8])
+
+            with mock.patch("mfsflow.stage_state._GZIP_FULL_CHECK_MAX_BYTES", 64):
+                with self.assertRaisesRegex(RuntimeError, "corrupt or unreadable"):
+                    _validate_gzip(path, "matrix", full_check=True)
 
 
 if __name__ == "__main__":

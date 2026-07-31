@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import gzip
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -22,16 +23,47 @@ def _artifact_record(path):
     return {
         "path": os.path.abspath(path),
         "size_bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
         "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
     }
 
 
-def _validate_gzip(path, label):
+def _config_digest(config):
+    stable_config = json.loads(json.dumps(config, default=str))
+    # The requested resume stage changes between runs and is not an analysis
+    # parameter, so it must not invalidate an earlier stage manifest.
+    stable_config.pop("which_Stage", None)
+    stable_config.pop("which_stage", None)
+    sample_config = stable_config.get("sample")
+    if isinstance(sample_config, dict):
+        for key in list(sample_config):
+            if key.startswith("discovered_"):
+                sample_config.pop(key, None)
+    stable_config.pop("_analysis_failed", None)
+    encoded = json.dumps(stable_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+# Compressed-size threshold (bytes) for the lightweight gzip check performed
+# immediately after Counting. Resume validation always requests a full stream
+# read, regardless of file size.
+_GZIP_FULL_CHECK_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _validate_gzip(path, label, full_check=True):
     try:
+        size = os.path.getsize(path)
+        if size == 0:
+            raise RuntimeError(f"{label} is empty: {path}")
         with gzip.open(path, "rb") as handle:
+            # Always confirm we can actually decompress data from the stream.
             if not handle.read(1):
                 raise RuntimeError(f"{label} is empty after decompression: {path}")
-    except (OSError, EOFError) as exc:
+            if full_check or size <= _GZIP_FULL_CHECK_MAX_BYTES:
+                # Small file: read the whole stream to catch mid-stream corruption.
+                while handle.read(1024 * 1024):
+                    pass
+    except (OSError, EOFError, gzip.BadGzipFile) as exc:
         raise RuntimeError(f"{label} is corrupt or unreadable: {path}: {exc}") from exc
 
 
@@ -149,7 +181,7 @@ def _validate_stage_outputs(runtime, stage, artifacts):
         matrix = os.path.join(expression_dir(out_dir), f"{project}.exon.umi", "matrix.mtx.gz")
         if not _nonempty_file(matrix):
             raise RuntimeError(f"Counting completed but required expression matrix is missing or empty: {matrix}")
-        _validate_gzip(matrix, "Expression matrix")
+        _validate_gzip(matrix, "Expression matrix", full_check=False)
     elif stage == SUMMARISING and str(runtime.config.get("make_stats", "yes")).lower() in ("yes", "true"):
         table = os.path.join(stats_dir(out_dir), f"{project}.stats.tsv")
         if not _nonempty_file(table):
@@ -181,6 +213,7 @@ def record_stage_success(runtime, stage):
         "stage": stage,
         "status": "success",
         "completed_at": datetime.now().isoformat(timespec="seconds"),
+        "config_sha256": _config_digest(runtime.config),
         "artifacts": [_artifact_record(path) for path in artifacts],
     }
     try:
@@ -195,6 +228,70 @@ def record_stage_success(runtime, stage):
     return manifest_path
 
 
+def validate_stage_manifest(runtime, stage):
+    """Validate a previously completed stage and all recorded artifacts."""
+    state_dir = stage_state_dir(runtime.out_dir)
+    manifest_path = os.path.join(state_dir, f"{stage}.manifest.json")
+    marker_path = os.path.join(state_dir, f"{stage}.success")
+    if not os.path.isfile(manifest_path) or not os.path.isfile(marker_path):
+        raise RuntimeError(f"Stage {stage} has no complete success manifest.")
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Stage {stage} manifest is unreadable: {manifest_path}: {exc}") from exc
+
+    if payload.get("status") != "success" or payload.get("stage") != stage:
+        raise RuntimeError(f"Stage {stage} manifest is not marked successful: {manifest_path}")
+    if payload.get("project") != runtime.project:
+        raise RuntimeError(f"Stage {stage} manifest belongs to a different project: {manifest_path}")
+    expected_digest = payload.get("config_sha256")
+    if expected_digest and expected_digest != _config_digest(runtime.config):
+        raise RuntimeError(f"Stage {stage} manifest was generated from a different configuration.")
+
+    artifacts = payload.get("artifacts") or []
+    if not artifacts:
+        if stage == SUMMARISING and str(runtime.config.get("make_stats", "yes")).lower() not in ("yes", "true", "1"):
+            return payload
+        raise RuntimeError(f"Stage {stage} manifest contains no artifacts: {manifest_path}")
+    changed = []
+    for artifact in artifacts:
+        path = artifact.get("path", "")
+        if not _nonempty_file(path):
+            changed.append(f"missing or empty: {path}")
+            continue
+        expected_size = artifact.get("size_bytes")
+        if expected_size is not None and os.path.getsize(path) != expected_size:
+            changed.append(f"size changed: {path}")
+            continue
+        expected_mtime = artifact.get("mtime_ns")
+        if expected_mtime is not None and os.stat(path).st_mtime_ns != expected_mtime:
+            changed.append(f"modified after manifest: {path}")
+    if changed:
+        hint = ""
+        if stage in (FILTERING, MAPPING, COUNTING):
+            hint = (
+                " These are intermediate artifacts that are removed once the pipeline "
+                "reaches the next stages. If you are resuming after a fully completed run, "
+                "re-run from the Filtering stage (--stage Filtering) to regenerate them."
+            )
+        raise RuntimeError(
+            f"Stage {stage} artifacts failed manifest validation: " + "; ".join(changed) + hint
+        )
+
+    if stage == FILTERING:
+        _quickcheck_bams(runtime, [a["path"] for a in artifacts if a.get("path", "").endswith(".bam")], unmapped=True)
+    elif stage == MAPPING:
+        _quickcheck_bams(runtime, [a["path"] for a in artifacts if a.get("path", "").endswith(".bam")])
+    elif stage == COUNTING:
+        for artifact in artifacts:
+            path = artifact.get("path", "")
+            if path.endswith(".mtx.gz"):
+                _validate_gzip(path, "Expression matrix", full_check=True)
+    return payload
+
+
 def validate_resume_inputs(runtime):
     """Validate inputs required to start from the configured resume stage."""
     stage = runtime.which_stage
@@ -204,6 +301,9 @@ def validate_resume_inputs(runtime):
     if stage == FILTERING:
         return
     if stage == MAPPING:
+        if os.path.exists(os.path.join(stage_state_dir(out_dir), f"{FILTERING}.manifest.json")):
+            validate_stage_manifest(runtime, FILTERING)
+            return
         candidates = _glob_files([
             os.path.join(runtime.tmp_merge_path, f"{project}*.raw.tagged.bam"),
             os.path.join(runtime.tmp_merge_path, f"{project}*.filtered.tagged.umi.bam"),
@@ -216,6 +316,9 @@ def validate_resume_inputs(runtime):
             )
         _quickcheck_bams(runtime, candidates, unmapped=True)
     elif stage == COUNTING:
+        if os.path.exists(os.path.join(stage_state_dir(out_dir), f"{MAPPING}.manifest.json")):
+            validate_stage_manifest(runtime, MAPPING)
+            return
         required = os.path.join(out_dir, f"{project}.filtered.tagged.umi.Aligned.out.bam")
         if not _nonempty_file(required):
             raise RuntimeError(
@@ -223,6 +326,9 @@ def validate_resume_inputs(runtime):
             )
         _quickcheck_bams(runtime, [required])
     elif stage == SUMMARISING:
+        if os.path.exists(os.path.join(stage_state_dir(out_dir), f"{COUNTING}.manifest.json")):
+            validate_stage_manifest(runtime, COUNTING)
+            return
         required = os.path.join(expression_dir(out_dir), f"{project}.exon.umi", "matrix.mtx.gz")
         if not _nonempty_file(required):
             raise RuntimeError(

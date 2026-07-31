@@ -2,6 +2,7 @@
 
 import gzip
 import importlib.util
+import logging
 import os
 import shutil
 
@@ -21,10 +22,37 @@ PYTHON_DEPENDENCIES = {
     "PIL": "Pillow",
 }
 
+logger = logging.getLogger(__name__)
 
-def check_python_dependencies(extra=None):
-    """Raise an actionable error when required Python packages are unavailable."""
-    dependencies = dict(PYTHON_DEPENDENCIES)
+
+def _as_bool(value, default=False):
+    """Interpret YAML booleans and their common string representations."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def check_python_dependencies(extra=None, config=None):
+    """Raise an actionable error for packages needed by the requested run."""
+    dependencies = {"yaml": PYTHON_DEPENDENCIES["yaml"]}
+    if config is None:
+        dependencies.update(PYTHON_DEPENDENCIES)
+    else:
+        stage = config.get("which_stage", config.get("which_Stage", FILTERING))
+        start_index = STAGE_ORDER.index(stage)
+        remaining = set(STAGE_ORDER[start_index:])
+        if remaining.intersection((FILTERING, MAPPING, COUNTING)):
+            dependencies["pysam"] = PYTHON_DEPENDENCIES["pysam"]
+        if COUNTING in remaining:
+            dependencies.update({name: PYTHON_DEPENDENCIES[name] for name in ("numpy", "pandas", "scipy")})
+        elif SUMMARISING in remaining and _as_bool(config.get("make_stats", True), default=True):
+            dependencies["numpy"] = PYTHON_DEPENDENCIES["numpy"]
+        if FILTERING in remaining and config.get("barcode_source") != "samplesheet_barcode":
+            dependencies.update({name: PYTHON_DEPENDENCIES[name] for name in ("numpy", "pandas")})
+        if _as_bool(config.get("make_h5ad", True), default=True) and COUNTING in remaining:
+            dependencies.update({name: PYTHON_DEPENDENCIES[name] for name in ("anndata", "h5py")})
     dependencies.update(extra or {})
     missing = [package for module, package in dependencies.items() if importlib.util.find_spec(module) is None]
     if missing:
@@ -45,7 +73,8 @@ def _tool_available(command):
 
 
 def check_external_tools(config):
-    start_index = STAGE_ORDER.index(config["which_Stage"])
+    stage = config.get("which_stage", config.get("which_Stage", FILTERING))
+    start_index = STAGE_ORDER.index(stage)
     remaining = set(STAGE_ORDER[start_index:])
     required = {}
     if FILTERING in remaining:
@@ -60,11 +89,16 @@ def check_external_tools(config):
     missing = [f"{name} ({path})" for name, path in required.items() if not _tool_available(path)]
     if missing:
         raise RuntimeError("Missing or non-executable external tools: " + ", ".join(missing))
+    if FILTERING in remaining:
+        seqkit = config.get("seqkit_exec", "seqkit")
+        if not _tool_available(seqkit):
+            logger.warning("SeqKit is unavailable (%s); FASTQ splitting will use the GNU split fallback.", seqkit)
 
 
 def check_reference_integrity(config):
     """Validate GTF readability and the core STAR index files before Mapping."""
-    start_index = STAGE_ORDER.index(config["which_Stage"])
+    stage = config.get("which_stage", config.get("which_Stage", FILTERING))
+    start_index = STAGE_ORDER.index(stage)
     remaining = STAGE_ORDER[start_index:]
     if not any(stage in remaining for stage in (FILTERING, MAPPING, COUNTING)):
         return
@@ -136,7 +170,7 @@ def check_disk_space(config, runtime):
 
 def run_preflight(config, runtime):
     """Run all checks required immediately before pipeline execution."""
-    check_python_dependencies()
+    check_python_dependencies(config=config)
     check_external_tools(config)
     check_reference_integrity(config)
     check_disk_space(config, runtime)

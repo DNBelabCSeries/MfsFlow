@@ -49,14 +49,23 @@ def run_counting_stage(runtime, run_stage_cmd):
     dge_cmd = [python_exec, resolve_script("dge_analysis.py"), yaml_file, samtools]
     run_stage_cmd(dge_cmd, "dge_analysis.py")
 
-    # Keep the aligned BAMs until all counting work succeeds so a failed DGE
-    # step can be resumed from Counting without rerunning Mapping.
-    remove_path(umi_aligned)
-    remove_path(int_aligned)
-    remove_path(umi_to_tx)
-    remove_path(int_to_tx)
-
     gene_tagged_bam = os.path.join(analysis_dir, f"{project}.filtered.Aligned.GeneTagged.bam")
     stats_enabled = str(config.get("make_stats", "yes")).lower() in ["yes", "true"]
     if not stats_enabled:
         remove_path(gene_tagged_bam)
+
+
+def cleanup_counting_inputs(runtime):
+    """Remove Mapping BAMs only after Counting has been marked successful."""
+    project = runtime.project
+    for suffix in (
+        ".filtered.tagged.umi.Aligned.out.bam",
+        ".filtered.tagged.internal.Aligned.out.bam",
+        ".filtered.tagged.umi.Aligned.toTranscriptome.out.bam",
+        ".filtered.tagged.internal.Aligned.toTranscriptome.out.bam",
+    ):
+        path = os.path.join(runtime.analysis_dir, project + suffix)
+        try:
+            remove_path(path)
+        except OSError as exc:
+            log_info(f"Warning: could not remove Counting input {path}: {exc}")

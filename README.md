@@ -17,7 +17,7 @@ Ensure you have the following installed on your system:
 
 ### System Requirements
 - **Python 3.8+**
-- **Linux/Unix** environment (recommended for production)
+- **Linux** environment (recommended and supported for production; macOS requires compatible external bioinformatics tools)
 
 ### Bundled Tools
 MfsFlow comes with bundled bioinformatics tools in the `software/` directory:
@@ -28,6 +28,8 @@ MfsFlow comes with bundled bioinformatics tools in the `software/` directory:
 - **FeatureCounts** (from Subread): For read counting
 
 The pipeline automatically resolves these tools from the `software/` directory on Linux systems. No manual installation required.
+On macOS, install compatible native versions of these tools separately and make
+them available on `PATH`.
 
 ### Python Dependencies
 Install via pip:

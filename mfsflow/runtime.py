@@ -71,13 +71,19 @@ class PipelineRuntime:
         which_stage = config.get("which_stage", config.get("which_Stage"))
         if not which_stage:
             raise KeyError("Missing pipeline stage key: which_Stage")
+        try:
+            num_threads = int(config["num_threads"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("num_threads must be a positive integer") from exc
+        if num_threads < 1:
+            raise ValueError("num_threads must be a positive integer")
         os.makedirs(tmp_merge_path, exist_ok=True)
         return cls(
             config=config,
             yaml_file=yaml_file,
             project=config["project"],
             out_dir=out_dir,
-            num_threads=int(config["num_threads"]),
+            num_threads=num_threads,
             which_stage=which_stage,
             python_exec=sys.executable or "python3",
             toolkit_dir=toolkit_dir,

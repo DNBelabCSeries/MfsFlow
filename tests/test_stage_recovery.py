@@ -3,7 +3,9 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from mfsflow.stages.counting import run_counting_stage
+from mfsflow.stages.counting import cleanup_counting_inputs, run_counting_stage
+from mfsflow.stages.mapping import cleanup_mapping_inputs
+from mfsflow.stages.statistics import cleanup_statistics_inputs
 
 
 class CountingRecoveryTests(unittest.TestCase):
@@ -45,11 +47,37 @@ class CountingRecoveryTests(unittest.TestCase):
 
             self.assertTrue(all(os.path.exists(path) for path in inputs))
 
-    def test_success_removes_mapping_outputs(self):
+    def test_counting_stage_keeps_mapping_outputs_until_manifest_is_written(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             inputs = self.create_counting_inputs(tmpdir)
             run_counting_stage(self.make_runtime(tmpdir), lambda _cmd, _stage_name: None)
+            self.assertTrue(all(os.path.exists(path) for path in inputs))
+            cleanup_counting_inputs(self.make_runtime(tmpdir))
             self.assertTrue(all(not os.path.exists(path) for path in inputs))
+
+    def test_mapping_cleanup_removes_only_completed_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            umi = os.path.join(tmpdir, "umi.bam")
+            internal = os.path.join(tmpdir, "internal.bam")
+            unrelated = os.path.join(tmpdir, "keep.bam")
+            for path in (umi, internal, unrelated):
+                open(path, "w").close()
+
+            cleanup_mapping_inputs([umi], [internal])
+
+            self.assertFalse(os.path.exists(umi))
+            self.assertFalse(os.path.exists(internal))
+            self.assertTrue(os.path.exists(unrelated))
+
+    def test_statistics_cleanup_removes_gene_tagged_bam(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            path = os.path.join(tmpdir, "sample.filtered.Aligned.GeneTagged.bam")
+            open(path, "w").close()
+
+            cleanup_statistics_inputs(runtime)
+
+            self.assertFalse(os.path.exists(path))
 
 
 if __name__ == "__main__":

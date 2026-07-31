@@ -29,6 +29,11 @@ class MfsflowPackageTests(unittest.TestCase):
         self.assertEqual(args.threads, 8)
         self.assertEqual(args.manual, "9")
 
+    def test_cli_exposes_version(self):
+        with self.assertRaises(SystemExit) as exit_ctx:
+            build_parser().parse_args(["--version"])
+        self.assertEqual(exit_ctx.exception.code, 0)
+
     def test_runtime_paths_are_derived_from_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
@@ -57,6 +62,18 @@ class MfsflowPackageTests(unittest.TestCase):
             runtime = PipelineRuntime.from_config(config, "/tmp/run_config.yaml")
 
             self.assertEqual(runtime.which_stage, MAPPING)
+
+    def test_runtime_rejects_non_positive_threads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": "P1",
+                "out_dir": os.path.join(tmpdir, "XPRESS_PROCESSING"),
+                "num_threads": 0,
+                "which_Stage": FILTERING,
+                "toolkit_directory": tmpdir,
+            }
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                PipelineRuntime.from_config(config, "/tmp/run_config.yaml")
 
     def test_duration_formatting(self):
         self.assertEqual(format_duration(12.345), "12.35s")

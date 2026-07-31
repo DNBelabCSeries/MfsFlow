@@ -30,15 +30,16 @@ mfsflow \
   --threads 20
 ```
 
-### Method 2: YAML Configuration File
+### Method 2: Generated YAML Configuration
 
-Create a YAML file and pass it to MfsFlow:
+The CLI builds and writes `XPRESS_PROCESSING/config/run_config.yaml` from the
+command-line options before starting the pipeline. This generated file records
+the exact settings used for a run and is the configuration file consumed by
+stage resume commands internally. The current CLI does not accept a separate
+`--config` argument.
 
-```bash
-mfsflow --config /path/to/config.yaml
-```
-
-See `mfsflow/yaml/example_config.yaml` (in source repo) for a complete example.
+See `mfsflow/yaml/example_config.yaml` (in source repo) for the available
+configuration fields.
 
 ## Project Configuration
 
