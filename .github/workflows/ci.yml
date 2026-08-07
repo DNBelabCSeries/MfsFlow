@@ -1,0 +1,78 @@
+name: MfsFlow CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.11", "3.13"]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install --no-deps -e .
+          python -m pip check
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile Python sources
+        run: python -m compileall -q mfsflow tests
+
+      - name: Check CLI and bundled tools
+        run: |
+          python -m mfsflow.cli --version
+          python -m mfsflow.cli --help >/dev/null
+          test -x mfsflow/software/STAR
+          test -x mfsflow/software/featureCounts
+          test -x mfsflow/software/pigz
+          test -x mfsflow/software/samtools
+          test -x mfsflow/software/seqkit
+
+  package:
+    name: Build and inspect wheel
+    runs-on: ubuntu-latest
+    needs: tests
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist
+
+      - name: Install wheel without dependencies
+        run: python -m pip install --no-deps --target wheel_check dist/*.whl
+
+      - name: Verify packaged resources
+        run: |
+          cd /tmp
+          PYTHONPATH="$GITHUB_WORKSPACE/wheel_check:$GITHUB_WORKSPACE" \
+            python -m unittest tests.test_package_data -v
