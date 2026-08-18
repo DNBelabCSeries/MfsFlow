@@ -78,6 +78,7 @@ counting_opts:
 performance_opts:
   stream_bc_correction: yes
   tmp_root: ~
+  tool_cache: ~ # Optional writable cache for bundled tools whose execute bit was lost.
   min_free_gb: 5
   disk_space_multiplier: 4.0
 

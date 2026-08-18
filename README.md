@@ -54,7 +54,7 @@ Required Python packages:
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/lishuangshuang0616/MfsFlow.git
+git clone https://github.com/DNBelabCSeries/MfsFlow.git
 cd MfsFlow
 ```
 

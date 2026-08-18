@@ -11,6 +11,8 @@ import os
 
 import yaml
 
+from mfsflow.tool_runtime import resolve_bundled_tool
+
 
 def write_run_config(config):
     """Write the pipeline configuration to a YAML run config file.
@@ -27,13 +29,10 @@ def write_run_config(config):
     run_config = copy.deepcopy(config)
     toolkit_dir = config.get("toolkit_directory") or "."
     run_config["toolkit_directory"] = toolkit_dir
-    software_dir = os.path.join(toolkit_dir, "software")
+    cache_dir = (config.get("performance_opts", {}) or {}).get("tool_cache")
 
     def resolve_tool(name):
-        candidate = os.path.join(software_dir, name)
-        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
-            return os.path.abspath(candidate)
-        return name
+        return resolve_bundled_tool(name, toolkit_dir, fallback=name, cache_dir=cache_dir)
 
     run_config["samtools_exec"] = resolve_tool("samtools")
     run_config["pigz_exec"] = resolve_tool("pigz")

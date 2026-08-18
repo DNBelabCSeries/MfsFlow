@@ -6,6 +6,7 @@ import sys
 from dataclasses import dataclass
 
 from mfsflow.path_layout import logs_dir, tmp_merge_dir
+from mfsflow.tool_runtime import persist_tool_paths, resolve_config_tool_paths
 
 __all__ = [
     "PipelineRuntime",
@@ -61,6 +62,10 @@ class PipelineRuntime:
         elif not os.path.isabs(toolkit_dir):
             # Relative path: resolve relative to YAML file's directory
             toolkit_dir = os.path.join(os.path.dirname(os.path.abspath(yaml_file)), toolkit_dir)
+        cache_dir = (config.get("performance_opts", {}) or {}).get("tool_cache")
+        resolved_tools = resolve_config_tool_paths(config, toolkit_dir, cache_dir=cache_dir)
+        persist_tool_paths(yaml_file, config, resolved_tools)
+        config.update(resolved_tools)
         exec_env = os.environ.copy()
         software_dir = os.path.join(toolkit_dir, "software")
         if sys.platform.startswith("linux") and os.path.isdir(software_dir):

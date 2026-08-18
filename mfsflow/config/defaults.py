@@ -61,6 +61,7 @@ DEFAULT_CONFIG = {
     "performance_opts": {
         "stream_bc_correction": True,
         "tmp_root": None,
+        "tool_cache": None,
         "min_free_gb": 5,
         "disk_space_multiplier": 4.0
     },

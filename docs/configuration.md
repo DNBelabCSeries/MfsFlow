@@ -319,6 +319,7 @@ counting_opts:
 |-----------|------|---------|-------------|
 | `performance_opts.stream_bc_correction` | bool | true | Enable streaming barcode correction |
 | `performance_opts.tmp_root` | string | null | Temporary root directory (e.g., `/dev/shm`) |
+| `performance_opts.tool_cache` | string | null | Writable cache for bundled tools when the installed package is read-only |
 | `performance_opts.min_free_gb` | number | 5 | Minimum free disk space required before execution |
 | `performance_opts.disk_space_multiplier` | number | 4.0 | Estimated workspace requirement relative to FASTQ size |
 | `num_threads` | int | 30 | Number of threads to use |
@@ -332,6 +333,7 @@ counting_opts:
 performance_opts:
   stream_bc_correction: true
   tmp_root: null          # or "/dev/shm"
+  tool_cache: null        # or "/path/to/writable/mfsflow-tool-cache"
 num_threads: 30
 ```
 

@@ -77,7 +77,7 @@ Error: Cannot find bundled STAR in software/ directory
 1. **Check if software/ directory exists**:
    ```bash
    ls -lh /path/to/MfsFlow/software/
-   # Should contain: star/, samtools/, subread/, pigz/, seqkit/
+   # Should contain: STAR, featureCounts, samtools, pigz, seqkit
    ```
 
 2. **Re-download the toolkit**:
@@ -90,8 +90,17 @@ Error: Cannot find bundled STAR in software/ directory
 
 3. **Check permissions**:
    ```bash
-   chmod -R +x /path/to/MfsFlow/software/*/bin/
+   chmod +x /path/to/MfsFlow/software/STAR \
+     /path/to/MfsFlow/software/featureCounts \
+     /path/to/MfsFlow/software/samtools \
+     /path/to/MfsFlow/software/pigz \
+     /path/to/MfsFlow/software/seqkit
    ```
+
+   Recent versions repair a missing execute bit automatically. If the Python
+   package directory is read-only, MfsFlow copies the affected tool to
+   `~/.cache/mfsflow/tools/` and runs that copy. Set `MFSFLOW_TOOL_CACHE` to a
+   writable directory when the default home cache is unavailable.
 
 4. **Use system-installed tools** (fallback):
    Install tools via Conda or system package manager (see [Installation Guide](installation.md))
