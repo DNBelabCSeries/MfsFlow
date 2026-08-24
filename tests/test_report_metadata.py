@@ -32,6 +32,19 @@ class ReportMetadataTests(unittest.TestCase):
         self.assertAlmostEqual(genic, 0.8)
         self.assertAlmostEqual(legacy_exon_intron, 3.0)
 
+    def test_mapping_ratio_includes_mapped_unassigned_fragments(self):
+        mapping, genic, _ = calculate_read_ratios(
+            exon_reads=50,
+            intron_reads=20,
+            intergenic_reads=10,
+            ambiguity_reads=0,
+            unmapped_reads=10,
+            other_unassigned_reads=10,
+            all_reads=100,
+        )
+        self.assertAlmostEqual(mapping, 0.9)
+        self.assertAlmostEqual(genic, 0.7)
+
     def test_empty_partial_report_is_written_atomically(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             outdir = Path(tmpdir) / "XPRESS_PROCESSING"

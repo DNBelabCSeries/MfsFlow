@@ -346,16 +346,16 @@ MfsFlow generates two types of HTML reports:
 ### Key Metrics
 
 #### Sample Overview
-- **Total Reads**: Number of reads in the sample
-- **Mapped Reads**: Number of reads successfully mapped to reference
-- **Mapping Ratio**: Percentage of mapped reads
-- **UMI Fraction**: Fraction of reads containing valid UMIs
-- **Exon+Intron Ratio**: Fraction of reads mapping to exons and introns
+- **Total Reads**: Number of read pairs for PE data, or reads for SE data
+- **Mapped Reads**: Number of read pairs/reads successfully mapped to reference
+- **Mapping Ratio**: Percentage of mapped read pairs/reads
+- **UMI Fraction**: Fraction of read pairs/reads containing valid UMIs
+- **Exon+Intron Ratio**: Fraction of read pairs/reads mapping to exons and introns
 
 #### UMI-Based vs Read-Based Statistics
 - **Genes Detected**: Number of genes with at least one read/UMI
 - **UMIs per Gene**: Median number of UMIs per gene
-- **Reads per UMI**: Median number of reads per UMI (indicates amplification bias)
+- **Reads per UMI**: Median number of read pairs/reads per UMI (indicates amplification bias)
 
 #### Read Distribution
 - **Exonic**: Reads mapping to exons

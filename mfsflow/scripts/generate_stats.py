@@ -31,8 +31,16 @@ except ImportError:
 def calculate_read_ratios(exon_reads, intron_reads, intergenic_reads, ambiguity_reads,
                           unmapped_reads, other_unassigned_reads, all_reads):
     """Return mapping, genic, and legacy exon/intron ratios."""
-    mapped_reads = exon_reads + intron_reads + intergenic_reads + ambiguity_reads
-    mapping_denom = mapped_reads + unmapped_reads + other_unassigned_reads
+    # featureCounts unassigned reasons other than Unmapped still describe
+    # aligned fragments (for example Chimera or FragmentLength).
+    mapped_reads = (
+        exon_reads
+        + intron_reads
+        + intergenic_reads
+        + ambiguity_reads
+        + other_unassigned_reads
+    )
+    mapping_denom = mapped_reads + unmapped_reads
     mapping_ratio = (mapped_reads / mapping_denom) if mapping_denom > 0 else None
     genic_ratio = ((exon_reads + intron_reads) / all_reads) if all_reads > 0 else None
     exon_intron_ratio = (exon_reads / intron_reads) if intron_reads > 0 else None

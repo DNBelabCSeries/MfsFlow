@@ -71,7 +71,7 @@ counting_opts:
   internal_strand: 0 #Optional override for internal-read counting. Historical default for internal reads is 0.
   Ham_Dist: 1 #Hamming distance collapsing of UMI sequences.
   twoPass: no #perform basic STAR twoPass mapping
-  gene_body_max_reads: 50000000 #Target number of primary mapped reads sampled for gene body coverage per read source. 0 disables downsampling.
+  gene_body_max_reads: 50000000 #Target primary R1 records (PE) or reads (SE) sampled per source. 0 disables downsampling.
   gene_body_sample_seed: 42 #Stable hash seed for unbiased gene body coverage sampling.
 
 #Runtime resource and temporary-file options

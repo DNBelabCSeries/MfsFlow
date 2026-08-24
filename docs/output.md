@@ -143,7 +143,7 @@ List of barcodes that passed filtering.
 
 **Format**: TSV with columns:
 - `XC`: Barcode sequence
-- `n`: Number of reads with this barcode
+- `n`: Number of read pairs for PE data, or reads for SE data, with this barcode
 
 ### `<project>.BCbinning.txt`
 Barcode binning results (Hamming distance collapsing).
@@ -154,7 +154,7 @@ Barcode binning results (Hamming distance collapsing).
 - `falseBC`: Observed barcode sequence
 - `hamming`: Hamming distance
 - `trueBC`: Selected whitelist barcode
-- `n`: Number of reads assigned from the observed barcode
+- `n`: Number of read pairs/reads assigned from the observed barcode
 
 ### `<sample>.unmatched_whitelist_barcodes.tsv`
 
@@ -166,7 +166,7 @@ whitelist overlap.
 **Format**: TSV with columns:
 
 - `barcode`: Observed raw barcode sequence
-- `reads`: Number of reads with this barcode
+- `reads`: Number of read pairs for PE data, or reads for SE data, with this barcode
 
 ### barcode_discovery_report.tsv
 Barcode discovery results (only when no barcode mode is specified, i.e., discovery mode).
@@ -177,7 +177,7 @@ Barcode discovery results (only when no barcode mode is specified, i.e., discove
 - `observed_barcode`: Barcode observed in reads
 - `matched_barcode`: Matched barcode from bundled lists
 - `match_type`: "exact" or "hamming-1"
-- `count`: Number of reads with this barcode
+- `count`: Number of read pairs for PE data, or reads for SE data, with this barcode
 
 ## Expression Files
 
@@ -381,13 +381,19 @@ Per-cell QC statistics.
 
 **Format**: TSV with columns:
 - `wellID`: Cell/well identifier
-- `internal_reads`, `umi_reads`, `all_reads`: Read totals
-- `MappingRatio`: Fraction assigned to mapped categories
+- `internal_reads`, `umi_reads`, `all_reads`: Read-pair totals for PE input, or read totals for SE input. Each PE pair contributes once; the output GeneTagged BAM still contains both mate records.
+- `MappingRatio`: Fraction of mapped read pairs/reads. FeatureCounts-unassigned
+  alignments such as chimeric or fragment-length-filtered records remain mapped;
+  only `Unmapped_reads` is excluded from the numerator.
 - `GenicRatio`: `(Exon_reads + intron_reads) / all_reads`
 - `ExonIntronRatio`: Legacy exon/intron quotient retained for compatibility
 - `UMIfrac`: UMI-read fraction
 - `Exon_umis`, `Intron_umis`, `Intron_Exon_umis`: UMI totals
 - `Exon_genes`, `Intron_genes`, `Intron_Exon_genes`: Detected gene totals
+
+The accompanying `<project>.read_stats.json` records this unit as
+`read_count_unit` (`read_pairs` for PE and `reads` for SE). DGE read matrices
+and saturation statistics use the same pair-level convention.
 
 ### `<project>.saturation.tsv`
 Saturation analysis results at different downsampling levels.
@@ -406,7 +412,10 @@ RSeQC-like gene body coverage profile.
 
 **Purpose**: 5' to 3' coverage bias analysis. The pipeline selects the longest
 transcript per gene from the GTF, splits the transcript body into 100 bins in
-5' to 3' orientation, and projects primary aligned reads onto those bins.
+5' to 3' orientation, and projects the primary R1 alignment for each PE
+fragment (or each primary alignment for SE) onto those bins. This follows the
+zUMIs first-mate counting convention; a mapped R2 is not promoted when R1 is
+unmapped.
 UMI and Internal reads are tracked separately, with an additional combined
 All-read profile in the text/PDF outputs.
 

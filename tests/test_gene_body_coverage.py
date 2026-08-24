@@ -1,7 +1,7 @@
 import os
-import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from mfsflow.scripts.run_featurecounts import (
     _project_blocks_to_gene_body,
@@ -9,6 +9,7 @@ from mfsflow.scripts.run_featurecounts import (
     coverage_sampling_fraction,
     load_gene_models,
     parse_featurecounts_mapped_reads,
+    estimate_primary_mapped_reads,
     primary_mapped_for_coverage,
     should_sample_for_coverage,
 )
@@ -73,15 +74,12 @@ class GeneBodyCoverageTests(unittest.TestCase):
 
 
 class FeatureCountsSummaryParserTests(unittest.TestCase):
-    """Locks the approximate behavior of parse_featurecounts_mapped_reads.
+    """Locks the pair-level behavior of parse_featurecounts_mapped_reads.
 
-    This function is NOT an exact equivalent of ``samtools view -c -F 2308``.
     It derives the denominator from the featureCounts .summary file, which
     includes supplementary alignments (FLAG 0x800) that --primary does not
-    filter. The coverage loop (should_count_read) skips supplementary, so the
-    true denominator is smaller. These tests document this over-count as
-    intentional (trading precision for speed) to prevent future devs from
-    "fixing" it without understanding the trade-off.
+    filter. The coverage loop skips supplementary, so this remains an
+    approximation, but PE pairs are counted once rather than once per mate.
     """
 
     def _write_summary(self, tmpdir, bam_name, rows):
@@ -93,15 +91,15 @@ class FeatureCountsSummaryParserTests(unittest.TestCase):
                 fh.write(f"{key}\t{val}\n")
         return bam_path
 
-    def test_pe_doubles_fragment_count_to_alignment_count(self):
+    def test_pe_uses_fragment_count_without_doubling(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bam = self._write_summary(tmpdir, "s1.bam", {
                 "Assigned": 1000,
                 "Unassigned_Unmapped": 200,
                 "Unassigned_NoFeatures": 50,
             })
-            # (1000 + 200 + 50 - 200 unmapped) * 2 for PE = 2100
-            self.assertEqual(2100, parse_featurecounts_mapped_reads(bam, "PE"))
+            # PE summary rows are already pair/fragment counts.
+            self.assertEqual(1050, parse_featurecounts_mapped_reads(bam, "PE"))
 
     def test_se_does_not_double(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -143,17 +141,28 @@ class FeatureCountsSummaryParserTests(unittest.TestCase):
                 fh.write("Assigned\t1000\n")
                 fh.write("Garbage\tNaN\n")
                 fh.write("Unassigned_Unmapped\t100\n")
-            # (1000 + 100 - 100) * 2 = 2000
-            self.assertEqual(2000, parse_featurecounts_mapped_reads(bam_path, "PE"))
+            # PE summary rows are already pair/fragment counts.
+            self.assertEqual(1000, parse_featurecounts_mapped_reads(bam_path, "PE"))
 
     def test_fallback_to_estimate_when_summary_missing(self):
         import mfsflow.scripts.run_featurecounts as rf
         orig = rf.estimate_primary_mapped_reads
-        rf.estimate_primary_mapped_reads = lambda b, s: 4242
+        rf.estimate_primary_mapped_reads = lambda b, s, layout: 4242
         try:
             self.assertEqual(4242, primary_mapped_for_coverage("/nonexistent.bam", "samtools", "PE"))
         finally:
             rf.estimate_primary_mapped_reads = orig
+
+    def test_fallback_estimate_counts_primary_r1_for_pe(self):
+        import mfsflow.scripts.run_featurecounts as rf
+
+        with mock.patch.object(rf.subprocess, "check_output", return_value="101\n"):
+            self.assertEqual(101, estimate_primary_mapped_reads("sample.bam", "samtools", "PE"))
+            self.assertEqual(101, estimate_primary_mapped_reads("sample.bam", "samtools", "SE"))
+            pe_cmd = rf.subprocess.check_output.call_args_list[0].args[0]
+            se_cmd = rf.subprocess.check_output.call_args_list[1].args[0]
+            self.assertEqual(["-f", "64"], pe_cmd[5:7])
+            self.assertNotIn("-f", se_cmd)
 
 
 if __name__ == "__main__":

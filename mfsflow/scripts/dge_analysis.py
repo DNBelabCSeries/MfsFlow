@@ -25,11 +25,13 @@ try:
     from mfsflow.scripts.umi_utils import cluster_umis
     from mfsflow.scripts.h5ad_export import export_h5ad
     from mfsflow.scripts.dge_utils import balance_reference_chunks, summarize_exon_intron_counts
+    from mfsflow.scripts.read_utils import is_pair_representative
     from mfsflow.path_layout import barcode_dir, expression_dir, stats_dir, load_config
 except ImportError:
     from umi_utils import cluster_umis
     from h5ad_export import export_h5ad
     from dge_utils import balance_reference_chunks, summarize_exon_intron_counts
+    from read_utils import is_pair_representative
     from path_layout import barcode_dir, expression_dir, stats_dir, load_config
 
 def process_barcode_worker(args):
@@ -111,6 +113,10 @@ def count_worker(args):
             for chrom in chroms:
                 iter_reads = bam.fetch(chrom)
                 for read in iter_reads:
+                    # BAM retains both PE mates, but PE read/UMI/saturation
+                    # statistics use the primary R1, matching zUMIs.
+                    if not is_pair_representative(read):
+                        continue
                     if read.is_unmapped:
                         continue
                     # Single CB fetch: replaces has_tag + get_tag (2 calls -> 1)
@@ -611,6 +617,7 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
 
         cell_matrix_stats = {
             "schema_version": 1,
+            "read_count_unit": "read_pairs" if str(config.get("read_layout", "PE")).upper() == "PE" else "reads",
             "umi": summarize_exon_intron_counts(final_umi_counts['exon'], final_umi_counts['intron']),
             "read": summarize_exon_intron_counts(final_read_counts['exon'], final_read_counts['intron']),
         }

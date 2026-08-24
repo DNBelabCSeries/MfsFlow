@@ -1,9 +1,9 @@
 import os
-import sys
 import gzip
 import tempfile
 import unittest
 import json
+import collections
 from types import SimpleNamespace
 from unittest import mock
 
@@ -14,7 +14,14 @@ from mfsflow.scripts.mapping_analysis import (
     setup_gtf,
 )
 from mfsflow.scripts.dge_utils import balance_reference_chunks, summarize_exon_intron_counts
-from mfsflow.scripts.run_featurecounts import build_featurecounts_cmd, normalize_read_category, resolve_counting_strand_modes, should_count_read
+from mfsflow.scripts.read_utils import is_pair_representative
+from mfsflow.scripts.run_featurecounts import (
+    build_featurecounts_cmd,
+    normalize_read_category,
+    resolve_counting_strand_modes,
+    should_count_read,
+    update_read_stats,
+)
 from mfsflow.path_layout import stage_state_dir
 from mfsflow.stages.mapping import run_mapping_stage
 
@@ -185,6 +192,7 @@ class MappingAndCountingLogicTests(unittest.TestCase):
             "PE",
         )
         self.assertIn("-p", cmd)
+        self.assertIn("--countReadPairs", cmd)
         self.assertIn("-C", cmd)
 
     def test_featurecounts_se_layout_does_not_enable_pair_options(self):
@@ -198,6 +206,7 @@ class MappingAndCountingLogicTests(unittest.TestCase):
             "SE",
         )
         self.assertNotIn("-p", cmd)
+        self.assertNotIn("--countReadPairs", cmd)
         self.assertNotIn("-C", cmd)
 
     def test_resolve_counting_strand_modes_preserves_historical_internal_default(self):
@@ -213,10 +222,37 @@ class MappingAndCountingLogicTests(unittest.TestCase):
         self.assertFalse(should_count_read("q2\t355\tchr1\t1\t255\t50M\t=\t1\t0\tACGT\tFFFF"))
         self.assertFalse(should_count_read("q3\t2147\tchr1\t1\t255\t50M\t=\t1\t0\tACGT\tFFFF"))
 
+    def test_pair_representative_counts_r1_once(self):
+        r1 = "q1\t99\tchr1\t1\t255\t50M\t=\t1\t0\tACGT\tFFFF"
+        r2 = "q1\t147\tchr1\t1\t255\t50M\t=\t1\t0\tACGT\tFFFF"
+        self.assertTrue(is_pair_representative(r1))
+        self.assertFalse(is_pair_representative(r2))
+
+    def test_pair_representative_keeps_unmapped_r1_like_zumis(self):
+        r1 = "q1\t69\t*\t0\t0\t*\t=\t1\t0\tACGT\tFFFF"
+        r2 = "q1\t137\tchr1\t1\t255\t50M\t=\t0\t0\tACGT\tFFFF"
+        self.assertTrue(is_pair_representative(r1))
+        self.assertFalse(is_pair_representative(r2))
+
+    def test_pair_representative_rejects_secondary_and_supplementary(self):
+        secondary_r1 = "q1\t355\tchr1\t1\t255\t50M\t=\t1\t0\tACGT\tFFFF"
+        supplementary_r1 = "q1\t2147\tchr1\t1\t255\t50M\t=\t1\t0\tACGT\tFFFF"
+        self.assertFalse(is_pair_representative(secondary_r1))
+        self.assertFalse(is_pair_representative(supplementary_r1))
+
+    def test_single_end_record_is_always_representative(self):
+        self.assertTrue(is_pair_representative("q1\t0\tchr1\t1\t255\t50M\t*\t0\t0\tACGT\tFFFF"))
+
     def test_normalize_read_category_collapses_unassigned_reasons(self):
         self.assertEqual(normalize_read_category("Exon"), "Exon")
         self.assertEqual(normalize_read_category("MappingQuality"), "Other_Unassigned")
         self.assertEqual(normalize_read_category("FragmentLength"), "Other_Unassigned")
+
+    def test_sam_fallback_counts_missing_cb_as_unused(self):
+        stats = collections.defaultdict(lambda: collections.defaultdict(int))
+        line = "q1\t64\tchr1\t1\t255\t50M\t*\t0\t0\tACGT\tFFFF"
+        update_read_stats(stats, line, "Exon", "UMI")
+        self.assertEqual(1, stats["__NO_CB__"]["Unused BC"])
 
 
 if __name__ == "__main__":

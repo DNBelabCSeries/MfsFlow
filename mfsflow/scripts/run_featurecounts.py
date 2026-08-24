@@ -21,8 +21,10 @@ from functools import lru_cache
 
 try:
     from mfsflow.path_layout import expression_dir, stats_dir, load_config
+    from mfsflow.scripts.read_utils import is_pair_representative
 except ImportError:
     from path_layout import expression_dir, stats_dir, load_config
+    from read_utils import is_pair_representative
 
 # Constants
 LOG_INTERVAL_READS = 10_000_000  # Print progress every N reads
@@ -61,17 +63,20 @@ def get_bam_chromosomes(bam_file, samtools_exec='samtools'):
         return set()
 
 
-def estimate_primary_mapped_reads(bam_file, samtools_exec='samtools'):
-    """Count primary mapped alignments for coverage sampling fraction estimation.
+def estimate_primary_mapped_reads(bam_file, samtools_exec='samtools', read_layout='PE'):
+    """Count primary mapped reads or read pairs for coverage sampling.
 
-    This performs a full ``samtools view -c -F 2308`` scan and is retained as a
-    fallback when no featureCounts summary is available.
+    This is retained as a fallback when no featureCounts summary is available.
+    For PE data, primary mapped R1 records are counted directly, matching the
+    zUMIs first-mate convention used by read statistics and DGE generation.
     """
+    layout = str(read_layout or "").upper()
     try:
-        output = subprocess.check_output(
-            [samtools_exec, "view", "-c", "-F", "2308", bam_file],
-            text=True,
-        )
+        cmd = [samtools_exec, "view", "-c", "-F", "2308"]
+        if layout == "PE":
+            cmd.extend(["-f", "64"])
+        cmd.append(bam_file)
+        output = subprocess.check_output(cmd, text=True)
         return int(str(output).strip() or 0)
     except Exception as exc:
         print(f"Warning: Could not estimate mapped read count for {bam_file}: {exc}")
@@ -79,16 +84,15 @@ def estimate_primary_mapped_reads(bam_file, samtools_exec='samtools'):
 
 
 def parse_featurecounts_mapped_reads(fc_bam, read_layout="PE"):
-    """Derive primary mapped alignment count from a featureCounts ``.summary`` file.
+    """Derive primary mapped read/pair count from a featureCounts summary.
 
     Avoids a full BAM scan: featureCounts already reports per-status counts. The
     summary path is derived from the returned BAM path (``<out_prefix>.bam`` ->
     ``<out_prefix>.counts.txt.summary``). Returns ``None`` if the summary is
     missing/unreadable so callers can fall back to ``estimate_primary_mapped_reads``.
 
-    featureCounts counts fragments in paired-end mode while ``samtools view -c``
-    counts alignments (one per mate), so the PE fragment count is doubled to match
-    the alignment-based denominator the coverage loop iterates over.
+    The summary is already fragment-oriented for paired-end input. The coverage
+    loop uses primary R1 records, so no PE doubling is applied here.
 
     .. warning::
 
@@ -102,8 +106,8 @@ def parse_featurecounts_mapped_reads(fc_bam, read_layout="PE"):
         **Impact**: the sampling fraction is slightly too small, so fewer reads
         are sampled for gene body coverage than the target. This affects
         coverage curve smoothness, **not** bias direction — the 5'/3' skew
-        conclusion is unchanged. The default ``gene_body_max_reads`` is bumped
-        to 12M to compensate for this denominator inflation.
+        conclusion is unchanged. The default ``gene_body_max_reads`` remains
+        configurable to compensate for this denominator inflation.
     """
     if not fc_bam:
         return None
@@ -130,16 +134,14 @@ def parse_featurecounts_mapped_reads(fc_bam, read_layout="PE"):
     total = sum(totals.values())
     unmapped = totals.get("Unassigned_Unmapped", 0)
     primary_mapped = max(0, total - unmapped)
-    if str(read_layout or "").upper() == "PE":
-        primary_mapped *= 2
     return primary_mapped
 
 
 def primary_mapped_for_coverage(fc_bam, samtools_exec, read_layout="PE"):
-    """Primary mapped alignment count for coverage sampling, summary-first."""
+    """Primary mapped read/pair count for coverage sampling, summary-first."""
     n = parse_featurecounts_mapped_reads(fc_bam, read_layout)
     if n is None:
-        n = estimate_primary_mapped_reads(fc_bam, samtools_exec)
+        n = estimate_primary_mapped_reads(fc_bam, samtools_exec, read_layout)
     return n
 
 
@@ -572,7 +574,10 @@ def build_featurecounts_cmd(
         '-Q', '0'
     ]
     if layout == "PE":
-        cmd.extend(['-p', '-C'])
+        # Subread >=2.0 separates declaring PE input (-p) from counting one
+        # fragment per pair (--countReadPairs). Keep both explicit so the
+        # featureCounts summary and assignment tags use pair-level semantics.
+        cmd.extend(['-p', '--countReadPairs', '-C'])
     if allow_multi_overlap:
         cmd.append('-O')
     if float(fraction_overlap) > 0:
@@ -815,6 +820,39 @@ def normalize_read_category(category):
     return category if category in READ_CATEGORIES else "Other_Unassigned"
 
 
+def update_read_stats(read_stats, read_obj, category, source_label, cb_value=None):
+    """Update one primary representative's per-barcode read statistics."""
+    if not should_count_read(read_obj):
+        return
+
+    category = normalize_read_category(category)
+    if isinstance(read_obj, str):
+        bc = None
+        cb_idx = read_obj.find("CB:Z:")
+        if cb_idx != -1:
+            end_cb = read_obj.find('\t', cb_idx)
+            if end_cb == -1:
+                end_cb = len(read_obj)
+            bc = read_obj[cb_idx + 5:end_cb].strip()
+    else:
+        bc = cb_value
+        if bc is None:
+            try:
+                bc = read_obj.get_tag("CB")
+            except KeyError:
+                pass
+
+    if not bc:
+        read_stats["__NO_CB__"]["Unused BC"] += 1
+        return
+
+    read_stats[bc][category] += 1
+    if source_label == 'UMI':
+        read_stats[bc]['UMI_Reads'] += 1
+    elif source_label == 'Internal':
+        read_stats[bc]['Internal_Reads'] += 1
+
+
 def _candidate_introns(chrom, strand_mode, is_reverse, intron_index):
     if strand_mode == 1:
         strands = ["-" if is_reverse else "+"]
@@ -986,39 +1024,6 @@ def process_bam_and_calculate_stats(
     intron_index = intron_index or {}
     intron_starts = intron_starts or {}
 
-    def update_stats(read_obj, category, source_lbl, cb_value=None):
-        category = normalize_read_category(category)
-        if isinstance(read_obj, str):
-            if not should_count_read(read_obj):
-                return
-            bc = None
-            cb_idx = read_obj.find("CB:Z:")
-            if cb_idx != -1:
-                end_cb = read_obj.find('\t', cb_idx)
-                if end_cb == -1: end_cb = len(read_obj)
-                bc = read_obj[cb_idx+5:end_cb].strip()
-
-            if bc:
-                read_stats[bc][category] += 1
-                if source_lbl == 'UMI': read_stats[bc]['UMI_Reads'] += 1
-                elif source_lbl == 'Internal': read_stats[bc]['Internal_Reads'] += 1
-
-        else: # pysam
-            if not should_count_read(read_obj):
-                return
-            bc = cb_value
-            if bc is None:
-                try:
-                    bc = read_obj.get_tag("CB")
-                except KeyError:
-                    pass
-            if bc is None:
-                read_stats["__NO_CB__"]["Unused BC"] += 1
-                return
-            read_stats[bc][category] += 1
-            if source_lbl == 'UMI': read_stats[bc]['UMI_Reads'] += 1
-            elif source_lbl == 'Internal': read_stats[bc]['Internal_Reads'] += 1
-
     def update_coverage(read_obj, gene_models, cov_arr):
         if not collect_coverage or not gene_models: return False
         if isinstance(read_obj, str):
@@ -1158,10 +1163,18 @@ def process_bam_and_calculate_stats(
                         g_name = gene_map.get(final_gene_id, final_gene_id)
                         final_read.set_tag('GN', g_name)
 
-                    # Stats
-                    update_stats(final_read, category, source_label, tag_values.get('CB'))
-                    if collect_coverage and update_coverage(final_read, gene_models, cov_arr):
-                        cov_count += 1
+                    # Count primary R1 for PE, matching zUMIs. Both mates are
+                    # still written to the output BAM unchanged.
+                    if is_pair_representative(final_read):
+                        update_read_stats(
+                            read_stats,
+                            final_read,
+                            category,
+                            source_label,
+                            tag_values.get('CB'),
+                        )
+                        if collect_coverage and update_coverage(final_read, gene_models, cov_arr):
+                            cov_count += 1
 
                     f_out.write(final_read)
             finally:
@@ -1269,10 +1282,12 @@ def process_bam_and_calculate_stats(
                 gene_name = gene_map.get(gene_id, gene_id)
                 final_line += f"\tGN:Z:{gene_name}"
 
-            # Stats
-            update_stats(final_line, category, source_label)
-            if collect_coverage and update_coverage(final_line, gene_models, cov_arr):
-                 cov_count += 1
+            # Count primary R1 for PE, matching zUMIs. Both mates are still
+            # written to the output BAM unchanged.
+            if is_pair_representative(final_line):
+                update_read_stats(read_stats, final_line, category, source_label)
+                if collect_coverage and update_coverage(final_line, gene_models, cov_arr):
+                    cov_count += 1
 
             proc_out.stdin.write(final_line + "\n")
 
@@ -1392,10 +1407,10 @@ def main():
 
     # Check existence
     if not os.path.exists(umi_bam) and not os.path.exists(internal_bam):
-         print(f"Error: Input BAMs not found.")
-         print(f"Checked UMI BAM: {umi_bam}")
-         print(f"Checked Internal BAM: {internal_bam}")
-         sys.exit(1)
+        print("Error: Input BAMs not found.")
+        print(f"Checked UMI BAM: {umi_bam}")
+        print(f"Checked Internal BAM: {internal_bam}")
+        sys.exit(1)
 
     header_bam = umi_bam if os.path.exists(umi_bam) else internal_bam
     valid_chroms = get_bam_chromosomes(header_bam, samtools_exec)
@@ -1627,6 +1642,7 @@ def main():
         os.makedirs(os.path.dirname(stats_out))
 
     stats_data = {
+        "read_count_unit": "read_pairs" if read_layout == "PE" else "reads",
         "read_stats": total_read_stats,
         "coverage_umi": total_cov_umi,
         "coverage_int": total_cov_int,
