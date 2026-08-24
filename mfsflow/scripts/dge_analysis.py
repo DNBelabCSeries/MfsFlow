@@ -10,30 +10,26 @@ RNA sequencing data processing.
 import sys
 import os
 import subprocess
-import csv
 import gzip
-import shutil
 from collections import defaultdict, Counter
-import scipy.io
-import scipy.sparse
 import numpy as np
-import pandas as pd
 import multiprocessing
 import json
 
 try:
     import pysam
 except ImportError:
-    print("Error: 'pysam' module is required. Please install it via pip install pysam")
-    sys.exit(1)
+    pysam = None
 
 try:
     from mfsflow.scripts.umi_utils import cluster_umis
     from mfsflow.scripts.h5ad_export import export_h5ad
+    from mfsflow.scripts.dge_utils import balance_reference_chunks, summarize_exon_intron_counts
     from mfsflow.path_layout import barcode_dir, expression_dir, stats_dir, load_config
 except ImportError:
     from umi_utils import cluster_umis
     from h5ad_export import export_h5ad
+    from dge_utils import balance_reference_chunks, summarize_exon_intron_counts
     from path_layout import barcode_dir, expression_dir, stats_dir, load_config
 
 def process_barcode_worker(args):
@@ -113,11 +109,7 @@ def count_worker(args):
     try:
         with pysam.AlignmentFile(bam_file, "rb") as bam:
             for chrom in chroms:
-                try:
-                    iter_reads = bam.fetch(chrom)
-                except ValueError:
-                    continue 
-                    
+                iter_reads = bam.fetch(chrom)
                 for read in iter_reads:
                     if read.is_unmapped:
                         continue
@@ -164,9 +156,9 @@ def count_worker(args):
                     if umi is not None:
                         local_umi_data[ftype][bc][gene_id][umi] += 1
                         
-    except Exception as e:
-        print(f"Error in count_worker for {chroms}: {e}")
-        return None
+    except Exception as exc:
+        labels = ", ".join(chroms) or "<no references>"
+        raise RuntimeError(f"DGE counting failed for references [{labels}]: {exc}") from exc
 
     ret_read_counts = {
         'exon': {k: dict(v) for k, v in local_read_counts_raw['exon'].items()},
@@ -456,12 +448,11 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
     try:
         # Get Chromosomes
         with pysam.AlignmentFile(bam_file, "rb") as b:
-            references = b.references
-            
-        # Split chromosomes into chunks for workers
+            references = list(b.references)
+            mapped_counts = {stat.contig: stat.mapped for stat in b.get_index_statistics()}
+
         worker_count = max(1, min(int(threads), len(references) or 1))
-        chunk_size = max(1, (len(references) + worker_count - 1) // worker_count)
-        ref_chunks = [references[i:i + chunk_size] for i in range(0, len(references), chunk_size)]
+        ref_chunks = balance_reference_chunks(references, mapped_counts, worker_count)
         
         print(f"Pass 1: Parallel Counting ({worker_count} workers, {len(ref_chunks)} chunks)...")
         
@@ -481,10 +472,10 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
             for chunk in ref_chunks
         ]
         
+        completed_chunks = 0
         with multiprocessing.Pool(worker_count) as pool:
             for res in pool.imap_unordered(count_worker, pass1_args):
-                if not res: continue
-                
+                completed_chunks += 1
                 partial_read, partial_umi, partial_global = res
                 
                 # Merge Global UMI (for saturation)
@@ -501,6 +492,11 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
                     for bc, genes in partial_umi[ftype].items():
                         for gene, umis in genes.items():
                             umi_data[ftype][bc][gene].update(umis)
+
+        if completed_chunks != len(pass1_args):
+            raise RuntimeError(
+                f"DGE counting returned {completed_chunks}/{len(pass1_args)} chromosome chunks."
+            )
 
         print("Pass 1 Complete. Calculating Statistics...")
 
@@ -613,6 +609,16 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
             write_sparse_matrix(final_read_counts['intron'], gene_list, gene_names_ref, barcode_list, out_dir, f"{project}.intron.read")
             write_sparse_matrix(final_read_counts['inex'], gene_list, gene_names_ref, barcode_list, out_dir, f"{project}.inex.read")
 
+        cell_matrix_stats = {
+            "schema_version": 1,
+            "umi": summarize_exon_intron_counts(final_umi_counts['exon'], final_umi_counts['intron']),
+            "read": summarize_exon_intron_counts(final_read_counts['exon'], final_read_counts['intron']),
+        }
+        cell_stats_path = os.path.join(stats_dir(out_dir), f"{project}.cell_matrix_stats.json")
+        with open(cell_stats_path, "w", encoding="utf-8") as handle:
+            json.dump(cell_matrix_stats, handle, separators=(",", ":"))
+        print(f"Cell matrix QC summary written: {cell_stats_path}")
+
         if bool(config.get('make_h5ad', True)):
             print("Exporting combined H5AD...")
             h5ad_path = export_h5ad(out_dir, project, config=config)
@@ -645,6 +651,8 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
                 os.remove(temp_sorted_bam + ".bai")
 
 def main():
+    if pysam is None:
+        raise RuntimeError("DGE analysis requires pysam. Install project dependencies first.")
     if len(sys.argv) < 3:
         print("Usage: python3 dge_analysis.py <yaml_config> <samtools_exec>")
         sys.exit(1)

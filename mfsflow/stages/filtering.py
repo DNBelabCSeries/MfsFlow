@@ -11,12 +11,42 @@ import glob
 import gzip
 import math
 import os
+import shutil
 import subprocess
 
 from mfsflow import pipeline_modules
 from mfsflow.bootstrap import run_barcode_discovery
+from mfsflow.config import persist_run_config
 from mfsflow.logging_utils import log_info
 from mfsflow.path_layout import barcode_dir, config_dir
+
+
+def _clear_previous_filtering_outputs(runtime):
+    """Remove generated Filtering data before a full stage rerun."""
+    removed = 0
+    os.makedirs(runtime.tmp_merge_path, exist_ok=True)
+    for entry in os.scandir(runtime.tmp_merge_path):
+        if entry.is_dir(follow_symlinks=False):
+            shutil.rmtree(entry.path)
+        else:
+            os.unlink(entry.path)
+        removed += 1
+
+    project = runtime.project
+    candidates = [
+        os.path.join(runtime.analysis_dir, f"{project}.BCstats.txt"),
+        os.path.join(runtime.analysis_dir, "stats", f"{project}.q30_stats.tsv"),
+        os.path.join(runtime.analysis_dir, f"{project}.filtered.tagged.umi.unmapped.bam"),
+        os.path.join(runtime.analysis_dir, f"{project}.filtered.tagged.internal.unmapped.bam"),
+    ]
+    candidates.extend(glob.glob(os.path.join(barcode_dir(runtime.analysis_dir), f"{project}.*")))
+    for path in candidates:
+        for target in (path, path + ".bai") if path.endswith(".bam") else (path,):
+            if os.path.isfile(target) or os.path.islink(target):
+                os.unlink(target)
+                removed += 1
+    if removed:
+        log_info(f"Removed {removed} stale Filtering artifact(s) before rerun.")
 
 
 def estimate_avg_line_len(path, sample_lines=1000):
@@ -42,14 +72,39 @@ def estimate_avg_line_len(path, sample_lines=1000):
     return (total / n) if n else 0.0
 
 
-def _make_group_batches(group_count, max_jobs):
-    batch_count = max(1, min(group_count, max_jobs))
-    batch_size = int(math.ceil(group_count / batch_count))
+def _make_weighted_group_batches(groups, max_jobs):
+    """Reorder FASTQ groups into contiguous batches balanced by compressed bytes."""
+    groups = list(groups)
+    if not groups:
+        return [], [], []
+    batch_count = max(1, min(len(groups), int(max_jobs)))
+    bins = [{"groups": [], "bytes": 0} for _ in range(batch_count)]
+
+    def group_size(group):
+        total = 0
+        for key in ("read1", "read2"):
+            path = group.get(key)
+            if path and os.path.isfile(path):
+                total += os.path.getsize(path)
+        return total
+
+    weighted = [(index, group, group_size(group)) for index, group in enumerate(groups)]
+    weighted.sort(key=lambda item: (-item[2], item[0]))
+    for _original_index, group, size in weighted:
+        target = min(range(batch_count), key=lambda index: (bins[index]["bytes"], len(bins[index]["groups"]), index))
+        bins[target]["groups"].append(group)
+        bins[target]["bytes"] += size
+
+    ordered = []
     batches = []
-    for idx, start in enumerate(range(0, group_count, batch_size)):
-        end = min(group_count, start + batch_size)
-        batches.append((f".group_{idx:03d}", start, end))
-    return batches
+    loads = []
+    for index, bucket in enumerate(bins):
+        start = len(ordered)
+        ordered.extend(bucket["groups"])
+        end = len(ordered)
+        batches.append((f".group_{index:03d}", start, end))
+        loads.append(bucket["bytes"])
+    return ordered, batches, loads
 
 
 def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
@@ -68,6 +123,7 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
     resolve_script = runtime.resolve_script
 
     log_info("Starting Filtering Stage")
+    _clear_previous_filtering_outputs(runtime)
 
     f1_str = config.get("sequence_files", {}).get("file1", {}).get("name", "")
     f2_str = config.get("sequence_files", {}).get("file2", {}).get("name", "")
@@ -113,11 +169,17 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
 
     direct_group_batches = []
     if direct_samplesheet_groups:
-        direct_group_batches = _make_group_batches(len(fastq_groups), max(1, num_threads // 3))
+        fastq_groups, direct_group_batches, batch_loads = _make_weighted_group_batches(
+            fastq_groups,
+            max(1, num_threads // 3),
+        )
+        config["fastq_groups"] = fastq_groups
+        persist_run_config(config, yaml_file)
         chunk_suffixes = [suffix for suffix, _start, _end in direct_group_batches]
         log_info(
             "Samplesheet direct FASTQ mode: "
-            f"{len(fastq_groups)} FASTQ group(s), {len(direct_group_batches)} fqfilter batch(es); skipping split"
+            f"{len(fastq_groups)} FASTQ group(s), {len(direct_group_batches)} fqfilter batch(es), "
+            f"compressed bytes/batch={','.join(str(value) for value in batch_loads)}; skipping split"
         )
     else:
         with timer.section("Filtering: split FASTQ", f"parts={split_parts};lines_per_chunk={lines_per_chunk};threads={num_threads}"):

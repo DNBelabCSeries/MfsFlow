@@ -20,6 +20,23 @@ class PreflightTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "pip install -r requirements.txt"):
                 check_python_dependencies({"missing_module": "missing-package"})
 
+    def test_counting_without_h5ad_does_not_require_scipy(self):
+        def find_spec(name):
+            return None if name == "scipy" else object()
+
+        config = {"which_Stage": COUNTING, "make_h5ad": False}
+        with mock.patch("mfsflow.preflight.importlib.util.find_spec", side_effect=find_spec):
+            check_python_dependencies(config=config)
+
+    def test_counting_with_h5ad_requires_scipy(self):
+        def find_spec(name):
+            return None if name == "scipy" else object()
+
+        config = {"which_Stage": COUNTING, "make_h5ad": True}
+        with mock.patch("mfsflow.preflight.importlib.util.find_spec", side_effect=find_spec):
+            with self.assertRaisesRegex(RuntimeError, "scipy"):
+                check_python_dependencies(config=config)
+
     def test_external_tool_check_accepts_executable_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tools = {}
@@ -36,6 +53,34 @@ class PreflightTests(unittest.TestCase):
                 "STAR_exec": tools["STAR"],
                 "featureCounts_exec": tools["featureCounts"],
             })
+
+    def test_external_tool_check_rejects_exec_format_errors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = os.path.join(tmpdir, "samtools")
+            with open(tool, "w") as handle:
+                handle.write("not a native executable")
+            os.chmod(tool, 0o755)
+            config = {
+                "which_Stage": FILTERING,
+                "samtools_exec": tool,
+                "pigz_exec": tool,
+                "STAR_exec": tool,
+                "featureCounts_exec": tool,
+            }
+            with mock.patch("mfsflow.preflight.subprocess.run", side_effect=OSError("Exec format error")):
+                with self.assertRaisesRegex(RuntimeError, "cannot execute"):
+                    check_external_tools(config)
+
+    def test_later_stage_preflight_preserves_recorded_tool_versions(self):
+        config = {
+            "which_Stage": SUMMARISING,
+            "tool_versions": {"STAR": "STAR_2.7", "samtools": "samtools 1.20"},
+        }
+
+        versions = check_external_tools(config)
+
+        self.assertEqual(versions, {"STAR": "STAR_2.7", "samtools": "samtools 1.20"})
+        self.assertEqual(config["tool_versions"], versions)
 
     def test_incomplete_star_index_fails_before_mapping(self):
         with tempfile.TemporaryDirectory() as tmpdir:

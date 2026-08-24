@@ -3,18 +3,35 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from mfsflow.report import (
+    calculate_summary_metrics,
     generate_multi_report,
     _process_sequencing_quality_data,
     _infer_transcriptome_label,
     export_deliverables_to_outs,
 )
+from mfsflow.scripts.generate_stats import calculate_read_ratios
 
 
 class ReportMetadataTests(unittest.TestCase):
+    def test_genic_ratio_matches_report_definition(self):
+        mapping, genic, legacy_exon_intron = calculate_read_ratios(
+            exon_reads=60,
+            intron_reads=20,
+            intergenic_reads=10,
+            ambiguity_reads=0,
+            unmapped_reads=10,
+            other_unassigned_reads=0,
+            all_reads=100,
+        )
+        self.assertAlmostEqual(mapping, 0.9)
+        self.assertAlmostEqual(genic, 0.8)
+        self.assertAlmostEqual(legacy_exon_intron, 3.0)
+
     def test_empty_partial_report_is_written_atomically(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             outdir = Path(tmpdir) / "XPRESS_PROCESSING"
@@ -66,7 +83,7 @@ class ReportMetadataTests(unittest.TestCase):
         })
         self.assertEqual(label, "custom_v1")
 
-    def test_export_deliverables_to_outs_moves_files(self):
+    def test_export_deliverables_to_outs_preserves_working_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             outdir = root / "XPRESS_PROCESSING"
@@ -88,6 +105,9 @@ class ReportMetadataTests(unittest.TestCase):
             (outdir / "Sample01.filtered.Aligned.GeneTagged.UBcorrected.sorted.bam.bai").write_text("bai")
             (config / "run_config.yaml").write_text("project: Sample01")
             (config / "expect_id_barcode.tsv").write_text("wellID\tumi_barcodes\tinternal_barcodes\n")
+            (outs / "stats").mkdir(parents=True)
+            (outs / "stats" / "Sample01.obsolete.tsv").write_text("stale")
+            (outs / "stats" / "Other.keep.tsv").write_text("other project")
 
             export_deliverables_to_outs(outdir, outs, "Sample01")
 
@@ -99,11 +119,72 @@ class ReportMetadataTests(unittest.TestCase):
             self.assertTrue((outs / "bam" / "Sample01.filtered.Aligned.GeneTagged.UBcorrected.sorted.bam.bai").exists())
             self.assertTrue((outs / "config" / "run_config.yaml").exists())
             self.assertTrue((outs / "config" / "expect_id_barcode.tsv").exists())
-            self.assertFalse((expr / "Sample01.h5ad").exists())
-            self.assertFalse(mex.exists())
-            self.assertFalse((stats / "Sample01.stats.tsv").exists())
-            self.assertFalse((outdir / "Sample01.filtered.Aligned.GeneTagged.UBcorrected.sorted.bam").exists())
-            self.assertFalse((config / "run_config.yaml").exists())
+            self.assertTrue((expr / "Sample01.h5ad").exists())
+            self.assertTrue(mex.exists())
+            self.assertTrue((stats / "Sample01.stats.tsv").exists())
+            self.assertTrue((outdir / "Sample01.filtered.Aligned.GeneTagged.UBcorrected.sorted.bam").exists())
+            self.assertTrue((config / "run_config.yaml").exists())
+            self.assertFalse((outs / "stats" / "Sample01.obsolete.tsv").exists())
+            self.assertTrue((outs / "stats" / "Other.keep.tsv").exists())
+
+    def test_failed_report_does_not_export_or_replace_success_report(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            outdir = root / "XPRESS_PROCESSING"
+            expression = outdir / "expression"
+            outs = root / "outs"
+            expression.mkdir(parents=True)
+            outs.mkdir()
+            working_h5ad = expression / "sample.h5ad"
+            working_h5ad.write_text("working")
+            success_report = outs / "sample_manual_report.html"
+            success_report.write_text("previous-success")
+
+            partial = generate_multi_report(
+                "sample",
+                str(outdir),
+                {
+                    "project": "sample",
+                    "out_dir": str(outdir),
+                    "sample": {"sample_type": "manual"},
+                    "reference": {},
+                    "_analysis_failed": True,
+                },
+            )
+
+            self.assertEqual(partial.name, "sample_partial_report.html")
+            self.assertEqual(success_report.read_text(), "previous-success")
+            self.assertTrue(working_h5ad.exists())
+            self.assertFalse((outs / "expression" / "sample.h5ad").exists())
+            self.assertTrue((outs / "partial_run_manifest.json").exists())
+
+    def test_success_report_is_not_replaced_when_deliverable_export_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processing = Path(tmpdir) / "XPRESS_PROCESSING"
+            processing.mkdir()
+            outs = Path(tmpdir) / "outs"
+            outs.mkdir()
+            report_path = outs / "sample_manual_report.html"
+            report_path.write_text("previous successful report", encoding="utf-8")
+            manifest_path = outs / "run_manifest.json"
+            manifest_path.write_text('{"status": "success"}\n', encoding="utf-8")
+            config = {
+                "project": "sample",
+                "out_dir": str(processing),
+                "sample": {"sample_type": "manual"},
+                "sequence_files": {"file1": {"name": "reads.fq.gz"}},
+                "reference": {},
+            }
+
+            with mock.patch(
+                "mfsflow.report.export_deliverables_to_outs",
+                side_effect=OSError("disk full"),
+            ):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    generate_multi_report("sample", str(processing), config)
+
+            self.assertEqual(report_path.read_text(encoding="utf-8"), "previous successful report")
+            self.assertFalse(manifest_path.exists())
 
     def test_sequencing_quality_summary_uses_q30_and_bcstats(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -163,6 +244,44 @@ class ReportMetadataTests(unittest.TestCase):
             self.assertIn('"Valid barcode reads", "value": "15"', context["sequencing_quality_summary_data"])
             self.assertIn('"Unused barcode reads", "value": "5"', context["sequencing_quality_summary_data"])
             self.assertIn('"Valid barcode rate", "value": "75.0%"', context["sequencing_quality_summary_data"])
+
+    def test_report_loaders_use_current_project_when_stale_files_exist(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            stats = outdir / "stats"
+            stats.mkdir(parents=True)
+            (outdir / "sample.BCstats.txt").write_text("AAAA\t100\n")
+            (outdir / "stale.BCstats.txt").write_text("AAAA\t9999\n")
+            for project, total in (("sample", 9000), ("stale", 9999000)):
+                (stats / f"{project}.q30_stats.tsv").write_text(
+                    "metric\ttotal_bases\tq30_bases\tq30_rate\n"
+                    f"R1\t{total}\t{total}\t1.0\n"
+                )
+            context = {
+                "_run_config": {
+                    "project": "sample",
+                    "sequence_files": {"file1": {"base_definition": ["cDNA(1-90)"]}},
+                }
+            }
+
+            _process_sequencing_quality_data(outdir, context)
+
+            self.assertIn('"Total sequencing reads", "value": "100"', context["sequencing_quality_summary_data"])
+            self.assertNotIn("11,110", context["sequencing_quality_summary_data"])
+
+    def test_report_does_not_use_another_projects_only_artifact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            stats = outdir / "stats"
+            stats.mkdir(parents=True)
+            (stats / "old_sample.stats.tsv").write_text(
+                "wellID\tIntron_Exon_umis\nP1A1\t10\n",
+                encoding="utf-8",
+            )
+
+            metrics = calculate_summary_metrics(outdir, project="current_sample")
+
+            self.assertEqual(metrics["rna_estm_Num_cell"], "")
 
 
 if __name__ == "__main__":

@@ -142,6 +142,7 @@ mfsflow \
 | `--threads` | No | Number of threads (default: 20) |
 | `--tmpRoot` | No | Temporary root for intermediate files (e.g., `/dev/shm`) |
 | `--stage` | No | Start from specific stage (Filtering/Mapping/Counting/Summarising) |
+| `--resume` | No | Reuse the saved run configuration; requires `--outdir` and an explicit `--stage` |
 | `--plate` | No | Plate ID for automatic barcode mode (mutually exclusive with `--manual`, `--expectBarcode`) |
 | `--manual` | No | Manual barcode IDs (comma-separated, e.g., `"20,21,22"`) (mutually exclusive with `--plate`, `--expectBarcode`) |
 | `--expectBarcode` | No | Path to custom barcode file (mutually exclusive with `--plate`, `--manual`) |
@@ -263,12 +264,8 @@ mfsflow \
 ```bash
 # Resume from Mapping stage (skip filtering)
 mfsflow \
-  --fastqs /data/fastq/Sample01 \
-  --genomeDir /ref/human_GRCh38 \
-  --sample Sample01 \
-  --plate 1 \
   --outdir /output/Sample01 \
-  --threads 20 \
+  --resume \
   --stage Mapping
 ```
 
@@ -330,14 +327,14 @@ of requiring you to guess the plate/manual ID upfront.
 
 MfsFlow generates two types of HTML reports:
 
-### 1. Automatic Report (`auto_report.html`)
+### 1. Automatic Report (`<project>_auto_plate_report.html`)
 
 - Overview statistics
 - Read distribution plots
 - QC metrics
 - Suitable for quick quality assessment
 
-### 2. Manual Report (`manual_report.html`)
+### 2. Manual Report (`<project>_manual_report.html`)
 
 - Detailed per-well statistics
 - UMI-based vs read-based statistics

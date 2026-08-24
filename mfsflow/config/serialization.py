@@ -8,6 +8,7 @@ boolean and None values.
 
 import copy
 import os
+import tempfile
 
 import yaml
 
@@ -62,6 +63,52 @@ def write_run_config(config):
 
     final_yaml_path = os.path.join(config["out_dir"], "config", "run_config.yaml")
     os.makedirs(os.path.dirname(final_yaml_path), exist_ok=True)
-    with open(final_yaml_path, "w") as f:
-        yaml.dump(run_config, f, Dumper=RunConfigDumper, default_flow_style=False, sort_keys=False)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=".run_config.",
+            suffix=".tmp",
+            dir=os.path.dirname(final_yaml_path),
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            yaml.dump(run_config, handle, Dumper=RunConfigDumper, default_flow_style=False, sort_keys=False)
+        os.replace(temporary, final_yaml_path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
     return final_yaml_path
+
+
+def load_run_config(path):
+    """Load and validate an existing run configuration."""
+    with open(path, "r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+    if not isinstance(config, dict):
+        raise ValueError(f"Run configuration is empty or invalid: {path}")
+    return config
+
+
+def persist_run_config(config, path):
+    """Atomically persist runtime state without re-resolving tools or inputs."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=".run_config.",
+            suffix=".tmp",
+            dir=directory,
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            yaml.safe_dump(config, handle, default_flow_style=False, sort_keys=False)
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+    return path

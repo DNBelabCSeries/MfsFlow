@@ -3,9 +3,20 @@ import sys
 import gzip
 import tempfile
 import unittest
+import json
+from types import SimpleNamespace
+from unittest import mock
 
-from mfsflow.scripts.mapping_analysis import build_star_misc_base, setup_gtf
+from mfsflow.scripts.mapping_analysis import (
+    build_star_command,
+    build_star_misc_base,
+    run_star_pipe,
+    setup_gtf,
+)
+from mfsflow.scripts.dge_utils import balance_reference_chunks, summarize_exon_intron_counts
 from mfsflow.scripts.run_featurecounts import build_featurecounts_cmd, normalize_read_category, resolve_counting_strand_modes, should_count_read
+from mfsflow.path_layout import stage_state_dir
+from mfsflow.stages.mapping import run_mapping_stage
 
 
 class MappingAndCountingLogicTests(unittest.TestCase):
@@ -19,9 +30,11 @@ class MappingAndCountingLogicTests(unittest.TestCase):
             101,
             "samtools",
         )
-        self.assertIn("--sjdbOverhang 100", misc)
+        overhang_index = misc.index("--sjdbOverhang")
+        self.assertEqual(misc[overhang_index + 1], "100")
         # stream_corrector outputs BAM; STAR must decode via samtools view
-        self.assertIn('--readFilesCommand "samtools view"', misc)
+        command_index = misc.index("--readFilesCommand")
+        self.assertEqual(misc[command_index + 1], "samtools view")
 
     def test_build_star_misc_base_skips_overhang_when_index_has_sjdb(self):
         misc = build_star_misc_base(
@@ -35,6 +48,113 @@ class MappingAndCountingLogicTests(unittest.TestCase):
         )
         self.assertNotIn("--sjdbOverhang", misc)
         self.assertNotIn("--sjdbGTFfile", misc)
+
+    def test_star_command_keeps_paths_with_spaces_as_single_arguments(self):
+        command = build_star_command(
+            "/tools with spaces/STAR",
+            ["--genomeDir", "/reference with spaces/star"],
+            "--clip3pAdapterSeq ACGT",
+            True,
+            "/output with spaces/sample.",
+        )
+        self.assertEqual(command[0], "/tools with spaces/STAR")
+        self.assertEqual(command[2], "/reference with spaces/star")
+        self.assertEqual(command[-1], "/output with spaces/sample.")
+        self.assertIn("--twopassMode", command)
+
+    def test_stream_corrector_failure_fails_mapping_even_when_star_succeeds(self):
+        producer = mock.Mock(returncode=7)
+        producer.stdout = mock.Mock()
+        consumer = mock.Mock(returncode=0)
+        with mock.patch(
+            "mfsflow.scripts.mapping_analysis.subprocess.Popen",
+            side_effect=[producer, consumer],
+        ) as popen:
+            with self.assertRaisesRegex(RuntimeError, "stream_corrector exited with code 7"):
+                run_star_pipe(["python3", "stream_corrector.py"], ["STAR", "--readFilesIn", "/dev/stdin"])
+
+        self.assertNotIn("shell", popen.call_args_list[1].kwargs)
+
+    def test_mapping_resume_uses_filtering_manifest_after_tmp_root_change(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = os.path.join(tmpdir, "XPRESS_PROCESSING")
+            old_tmp = os.path.join(tmpdir, "old-tmp")
+            new_tmp = os.path.join(tmpdir, "new-tmp")
+            os.makedirs(old_tmp)
+            os.makedirs(new_tmp)
+            raw_bam = os.path.join(old_tmp, "sample.group_000.raw.tagged.bam")
+            with open(raw_bam, "wb") as handle:
+                handle.write(b"BAM")
+            state_dir = stage_state_dir(outdir)
+            os.makedirs(state_dir)
+            with open(os.path.join(state_dir, "Filtering.manifest.json"), "w", encoding="utf-8") as handle:
+                json.dump({"artifacts": [{"path": raw_bam}]}, handle)
+
+            runtime = SimpleNamespace(
+                project="sample",
+                analysis_dir=outdir,
+                tmp_merge_path=new_tmp,
+                out_dir=outdir,
+                python_exec="python3",
+                yaml_file=os.path.join(outdir, "config", "run_config.yaml"),
+                resolve_script=lambda name: name,
+                which_stage="Mapping",
+            )
+            commands = []
+
+            umi_chunks, int_chunks = run_mapping_stage(
+                runtime,
+                lambda command, _name: commands.append(command),
+            )
+
+            self.assertEqual(umi_chunks, [raw_bam])
+            self.assertEqual(int_chunks, [raw_bam])
+            self.assertIn(raw_bam, commands[0][commands[0].index("--umi_bam") + 1])
+
+    def test_mapping_rerun_removes_stale_star_outputs_but_keeps_legacy_input(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processing = os.path.join(tmpdir, "XPRESS_PROCESSING")
+            os.makedirs(os.path.join(processing, "config"))
+            stale = os.path.join(processing, "sample.filtered.tagged.internal.Aligned.out.bam")
+            legacy = os.path.join(processing, "sample.filtered.tagged.internal.unmapped.bam")
+            umi_chunk = os.path.join(tmpdir, "sample.raw.tagged.bam")
+            for path in (stale, legacy, umi_chunk):
+                with open(path, "wb") as handle:
+                    handle.write(b"BAM")
+            runtime = SimpleNamespace(
+                project="sample",
+                analysis_dir=processing,
+                tmp_merge_path=os.path.join(processing, "intermediate", "tmp_merge"),
+                out_dir=processing,
+                python_exec="python3",
+                yaml_file=os.path.join(processing, "config", "run_config.yaml"),
+                resolve_script=lambda name: name,
+                which_stage="Filtering",
+            )
+
+            run_mapping_stage(runtime, lambda _command, _name: None, umi_chunks=[umi_chunk])
+
+            self.assertFalse(os.path.exists(stale))
+            self.assertTrue(os.path.exists(legacy))
+
+    def test_dge_reference_chunks_are_balanced_by_mapped_reads(self):
+        chunks = balance_reference_chunks(
+            ["chr1", "chr2", "chr3", "chr4"],
+            {"chr1": 1000, "chr2": 600, "chr3": 400, "chr4": 1},
+            2,
+        )
+        self.assertEqual(len(chunks), 2)
+        loads = [sum({"chr1": 1000, "chr2": 600, "chr3": 400, "chr4": 1}[c] for c in chunk) for chunk in chunks]
+        self.assertEqual(sorted(loads), [1000, 1001])
+
+    def test_dge_cell_summary_preserves_existing_combined_stats_semantics(self):
+        summary = summarize_exon_intron_counts(
+            {"BC1": {"G1": 3, "G2": 2}},
+            {"BC1": {"G1": 1, "G3": 4}},
+        )
+        self.assertEqual(summary["exon"]["BC1"], {"umis": 5, "genes": 2})
+        self.assertEqual(summary["intron"]["BC1"], {"umis": 5, "genes": 2})
+        self.assertEqual(summary["inex"]["BC1"], {"umis": 10, "genes": 3})
 
     def test_setup_gtf_decompresses_gzipped_gtf(self):
         with tempfile.TemporaryDirectory() as tmpdir:

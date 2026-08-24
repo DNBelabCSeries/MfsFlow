@@ -60,6 +60,13 @@ class StageStateTests(unittest.TestCase):
             runtime = SimpleNamespace(tools=SimpleNamespace(samtools=None))
             _quickcheck_bams(runtime, [bam], unmapped=True)
 
+    def test_mapped_quickcheck_uses_pysam_when_samtools_missing(self):
+        runtime = SimpleNamespace(tools=SimpleNamespace(samtools=None))
+        with mock.patch("mfsflow.stage_state._pysam_validate_bams") as fallback:
+            _quickcheck_bams(runtime, ["/tmp/aligned.bam"])
+
+        fallback.assert_called_once_with(["/tmp/aligned.bam"])
+
     def test_quickcheck_pysam_fallback_when_samtools_old_rejects_u_flag(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bam = os.path.join(tmpdir, "raw.tagged.bam")
@@ -102,7 +109,8 @@ class StageStateTests(unittest.TestCase):
             with open(bam, "wb") as handle:
                 handle.write(b"BAM")
 
-            manifest = record_stage_success(runtime, MAPPING)
+            with mock.patch("mfsflow.stage_state._quickcheck_bams"):
+                manifest = record_stage_success(runtime, MAPPING)
             marker = os.path.join(stage_state_dir(tmpdir), "Mapping.success")
             self.assertTrue(os.path.exists(marker))
             payload = json.loads(manifest.read_text())
@@ -158,6 +166,20 @@ class StageStateTests(unittest.TestCase):
             with mock.patch("mfsflow.stage_state._quickcheck_bams"):
                 record_stage_success(runtime, MAPPING)
                 runtime.config["which_Stage"] = "Mapping"
+                validate_stage_manifest(runtime, MAPPING)
+
+    def test_manifest_validation_allows_resume_thread_and_tmp_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            runtime.config.update({"num_threads": 8, "performance_opts": {"tmp_root": "/tmp/a"}})
+            bam = os.path.join(tmpdir, "sample.filtered.tagged.umi.Aligned.out.bam")
+            with open(bam, "wb") as handle:
+                handle.write(b"BAM")
+
+            with mock.patch("mfsflow.stage_state._quickcheck_bams"):
+                record_stage_success(runtime, MAPPING)
+                runtime.config["num_threads"] = 20
+                runtime.config["performance_opts"]["tmp_root"] = "/tmp/b"
                 validate_stage_manifest(runtime, MAPPING)
 
     def test_manifest_validation_accepts_stats_disabled_noop(self):

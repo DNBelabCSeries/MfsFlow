@@ -9,14 +9,12 @@ RNA sequencing data processing.
 
 import sys
 import os
-import glob
 import subprocess
-import math
 import shutil
 import collections
 import itertools
 import gzip
-import sys
+import shlex
 
 try:
     from mfsflow.path_layout import barcode_dir, load_config
@@ -175,23 +173,38 @@ def star_index_has_embedded_sjdb(index_params):
 
 def build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, read_len, samtools):
     misc_parts = [
-        f"--genomeDir {star_index}",
-        f"--runThreadN {num_threads}",
-        f"--readFilesType SAM {read_layout}",
+        "--genomeDir", star_index,
+        "--runThreadN", str(num_threads),
+        "--readFilesType", "SAM", read_layout,
         # stream_corrector.py outputs BAM (binary); samtools view decodes it for STAR.
-        f'--readFilesCommand "{samtools} view"',
-        "--outSAMmultNmax 1",
-        "--outFilterMultimapNmax 50",
-        "--outSAMunmapped Within",
-        "--outSAMtype BAM Unsorted",
-        "--limitOutSJcollapsed 5000000",
+        "--readFilesCommand", shlex.join([samtools, "view"]),
+        "--outSAMmultNmax", "1",
+        "--outFilterMultimapNmax", "50",
+        "--outSAMunmapped", "Within",
+        "--outSAMtype", "BAM", "Unsorted",
+        "--limitOutSJcollapsed", "5000000",
     ]
     if not index_has_sjdb:
         if read_len <= 0:
             raise ValueError("Unable to determine read length required for STAR sjdbOverhang.")
-        misc_parts.insert(1, f"--sjdbGTFfile {final_gtf}")
-        misc_parts.insert(2, f"--sjdbOverhang {read_len - 1}")
-    return " ".join(misc_parts)
+        misc_parts[2:2] = [
+            "--sjdbGTFfile", final_gtf,
+            "--sjdbOverhang", str(read_len - 1),
+        ]
+    return misc_parts
+
+
+def build_star_command(star_exec, misc_args, extra_params, two_pass, output_prefix):
+    """Build a STAR argv list without shell interpolation."""
+    if isinstance(extra_params, str):
+        extra_args = shlex.split(extra_params)
+    else:
+        extra_args = list(extra_params or [])
+    command = [star_exec] + list(misc_args) + extra_args
+    if two_pass:
+        command.extend(["--twopassMode", "Basic"])
+    command.extend(["--readFilesIn", "/dev/stdin", "--outFileNamePrefix", output_prefix])
+    return command
 
 def setup_gtf(config, project, out_dir, samtools):
     # Handle additional files
@@ -251,19 +264,24 @@ def setup_gtf(config, project, out_dir, samtools):
             
     return final_gtf, ""
 
-def run_star_pipe(corrector_args, star_cmd_str):
+def run_star_pipe(corrector_args, star_args):
     """
     Runs a pipeline: Corrector (Python) -> STAR
     """
-    print(f"Starting Pipeline: {' '.join(corrector_args[:3])}... -> STAR")
+    print(f"Starting Pipeline: {shlex.join(corrector_args[:3])}... -> STAR")
     
     # Start Producer (Corrector)
     # Use list args to avoid shell quoting issues with many files
     p1 = subprocess.Popen(corrector_args, stdout=subprocess.PIPE)
     
-    # Start Consumer (STAR)
-    # star_cmd_str should use --readFilesIn /dev/stdin
-    p2 = subprocess.Popen(star_cmd_str, shell=True, stdin=p1.stdout)
+    # Start Consumer (STAR). argv form keeps paths and user arguments isolated.
+    try:
+        p2 = subprocess.Popen(star_args, stdin=p1.stdout)
+    except Exception:
+        p1.stdout.close()
+        p1.terminate()
+        p1.wait()
+        raise
     
     # Close p1's stdout in this parent process so only p2 holds it
     p1.stdout.close()
@@ -272,12 +290,13 @@ def run_star_pipe(corrector_args, star_cmd_str):
     p2.wait()
     p1.wait()
     
+    failures = []
     if p2.returncode != 0:
-        raise RuntimeError(f"STAR failed with return code {p2.returncode}")
-    
-    # If STAR succeeds, p1 should also succeed (0) or SIGPIPE (141/-13)
-    if p1.returncode not in (0, -13, 141):
-         print(f"Warning: Corrector script exited with code {p1.returncode}")
+        failures.append(f"STAR exited with code {p2.returncode}")
+    if p1.returncode != 0:
+        failures.append(f"stream_corrector exited with code {p1.returncode}")
+    if failures:
+        raise RuntimeError("Mapping stream failed: " + "; ".join(failures))
 
 def main():
     import argparse
@@ -387,10 +406,7 @@ def main():
     
     extra_params = config['reference'].get('additional_STAR_params', '') or ""
     
-    # Two-pass mode
-    twopass = ""
-    if config['counting_opts'].get('twoPass', False):
-        twopass = "--twopassMode Basic"
+    two_pass = bool(config['counting_opts'].get('twoPass', False))
 
     # Run UMI
     if umi_bams:
@@ -402,7 +418,13 @@ def main():
         # STAR Command (Consumer)
         # --readFilesIn /dev/stdin
         misc_base = build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, umi_read_len, samtools)
-        cmd_umi = f"{star_exec} {misc_base} {extra_params} {param_add_fa} {twopass} --readFilesIn /dev/stdin --outFileNamePrefix {prefix_umi}"
+        cmd_umi = build_star_command(
+            star_exec,
+            misc_base,
+            [*shlex.split(extra_params), *shlex.split(param_add_fa)],
+            two_pass,
+            prefix_umi,
+        )
         
         run_star_pipe(corrector_args, cmd_umi)
         print("STAR UMI finished.")
@@ -416,7 +438,13 @@ def main():
         
         # STAR Command
         misc_base = build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, internal_read_len, samtools)
-        cmd_int = f"{star_exec} {misc_base} {extra_params} {param_add_fa} {twopass} --readFilesIn /dev/stdin --outFileNamePrefix {prefix_int}"
+        cmd_int = build_star_command(
+            star_exec,
+            misc_base,
+            [*shlex.split(extra_params), *shlex.split(param_add_fa)],
+            two_pass,
+            prefix_int,
+        )
         
         run_star_pipe(corrector_args, cmd_int)
         print("STAR Internal finished.")

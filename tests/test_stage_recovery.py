@@ -2,10 +2,11 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from mfsflow.stages.counting import cleanup_counting_inputs, run_counting_stage
 from mfsflow.stages.mapping import cleanup_mapping_inputs
-from mfsflow.stages.statistics import cleanup_statistics_inputs
+from mfsflow.stages.statistics import cleanup_statistics_inputs, run_statistics_stage
 
 
 class CountingRecoveryTests(unittest.TestCase):
@@ -54,6 +55,35 @@ class CountingRecoveryTests(unittest.TestCase):
             self.assertTrue(all(os.path.exists(path) for path in inputs))
             cleanup_counting_inputs(self.make_runtime(tmpdir))
             self.assertTrue(all(not os.path.exists(path) for path in inputs))
+
+    def test_counting_rerun_removes_stale_optional_outputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            inputs = self.create_counting_inputs(tmpdir)
+            stale_expression = os.path.join(tmpdir, "expression", "sample.intron.umi")
+            os.makedirs(stale_expression)
+            stale_h5ad = os.path.join(tmpdir, "expression", "sample.h5ad")
+            open(stale_h5ad, "w").close()
+
+            run_counting_stage(self.make_runtime(tmpdir), lambda _cmd, _stage_name: None)
+
+            self.assertFalse(os.path.exists(stale_expression))
+            self.assertFalse(os.path.exists(stale_h5ad))
+            self.assertTrue(all(os.path.exists(path) for path in inputs))
+
+    def test_disabled_statistics_rerun_removes_old_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            runtime.config["make_stats"] = False
+            stats_dir = os.path.join(tmpdir, "stats")
+            os.makedirs(stats_dir)
+            stale = os.path.join(stats_dir, "sample.stats.tsv")
+            open(stale, "w").close()
+            run_cmd = mock.Mock()
+
+            run_statistics_stage(runtime, run_cmd)
+
+            self.assertFalse(os.path.exists(stale))
+            run_cmd.assert_not_called()
 
     def test_mapping_cleanup_removes_only_completed_inputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -332,7 +332,7 @@ ERROR: failed to open the annotation file
 
 4. **Restart from last successful stage**:
    ```bash
-   mfsflow ... --stage Counting  # Resume from Counting
+   mfsflow --resume --outdir /path/to/output --stage Counting
    ```
 
 ## Output Issues
@@ -378,7 +378,7 @@ ERROR: Output directory already exists: /path/to/output
 
 3. **Resume from failed stage**:
    ```bash
-   mfsflow ... --stage <failed_stage>
+   mfsflow --resume --outdir /path/to/output --stage <failed_stage>
    ```
 
 ### Issue: BAM file is corrupted
@@ -482,7 +482,7 @@ ERROR: Output directory already exists: /path/to/output
 1. **Check stats files**:
    ```bash
    ls -lh XPRESS_PROCESSING/stats/
-   head -5 XPRESS_PROCESSING/stats/qc_stats.tsv
+   head -5 XPRESS_PROCESSING/stats/<project>.stats.tsv
    ```
 
 2. **Re-run stats generation**:

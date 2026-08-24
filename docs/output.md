@@ -31,17 +31,21 @@ out_dir/
 └── outs/                   # Final outputs for users
     ├── <project>_auto_plate_report.html  # Automatic report
     ├── <project>_manual_report.html      # Manual report
-    ├── expression/                       # H5AD and MEX matrices moved from XPRESS_PROCESSING/expression/
+    ├── expression/                       # H5AD and MEX matrices exported from XPRESS_PROCESSING/expression/
     ├── stats/                            # QC tables, read stats, saturation tables, and plots
     ├── bam/                              # Final UB-corrected BAM and index
-    └── config/                           # run_config.yaml and expected barcode table
+    ├── config/                           # run_config.yaml and expected barcode table
+    ├── diagnostics/                      # Logs, stage manifests, and barcode diagnostics
+    └── run_manifest.json                 # Status, provenance, artifact inventory, and checksums
 ```
 
 `XPRESS_PROCESSING/` is the working directory used while the pipeline is running.
 MfsFlow supports resuming from intermediate stages if a run stops before completion.
-After a successful report/export step, customer-facing deliverables are moved to
-`outs/`; completed runs should be consumed from `outs/`, not resumed from the moved
-working outputs.
+After a successful report/export step, customer-facing deliverables are copied or
+hard-linked into `outs/`. Working artifacts remain in `XPRESS_PROCESSING/`, so an
+interrupted run can be resumed without reconstructing configuration or barcode
+tables. Failed runs create `<project>_partial_report.html` and
+`partial_run_manifest.json` but do not export expression matrices or BAMs.
 
 ## Configuration Files
 
@@ -111,18 +115,18 @@ Timing information for each pipeline stage.
 **Purpose**: Performance analysis.
 
 **Format**: TSV with columns:
-- `stage`: Pipeline stage name
-- `start_time`: Stage start time
-- `end_time`: Stage end time
-- `duration_seconds`: Stage duration in seconds
+- `timestamp`: Completion/failure timestamp
+- `project`: Project name
+- `stage`: Pipeline stage or substage name
+- `status`: `ok` or `failed`
+- `duration_sec`: Duration in seconds
+- `duration_human`: Human-readable duration
+- `details`: Command or execution details
 
 Example:
 ```
-stage	start_time	end_time	duration_seconds
-Filtering	2026-05-25 10:30:20	2026-05-25 10:35:45	325.2
-Mapping	2026-05-25 10:35:46	2026-05-25 11:15:22	2376.8
-Counting	2026-05-25 11:15:23	2026-05-25 11:22:10	407.5
-Summarising	2026-05-25 11:22:11	2026-05-25 11:25:33	202.1
+timestamp	project	stage	status	duration_sec	duration_human	details
+2026-05-25 10:35:45	Sample01	Filtering: fqfilter chunks	ok	325.200	5m25.20s	chunks=12
 ```
 
 ### Stage-specific logs
@@ -132,25 +136,37 @@ Individual log files for each pipeline stage (if available).
 
 Located in `XPRESS_PROCESSING/barcodes/`:
 
-### kept_barcodes.tsv
+### `<project>kept_barcodes.txt`
 List of barcodes that passed filtering.
 
 **Purpose**: Quality control of barcode selection.
 
 **Format**: TSV with columns:
-- `barcode`: Barcode sequence
-- `count`: Number of reads with this barcode
-- `well_id`: Assigned well ID (if matched)
+- `XC`: Barcode sequence
+- `n`: Number of reads with this barcode
 
-### barcode_binned.tsv
+### `<project>.BCbinning.txt`
 Barcode binning results (Hamming distance collapsing).
 
 **Purpose**: Shows barcode correction results.
 
+**Format**: CSV with columns:
+- `falseBC`: Observed barcode sequence
+- `hamming`: Hamming distance
+- `trueBC`: Selected whitelist barcode
+- `n`: Number of reads assigned from the observed barcode
+
+### `<sample>.unmatched_whitelist_barcodes.tsv`
+
+The 100 most abundant observed barcodes that did not exactly match the active
+whitelist, ordered by read count. The file is written before strict whitelist
+validation, so it is also available when barcode selection fails with no
+whitelist overlap.
+
 **Format**: TSV with columns:
-- `original_barcode`: Original barcode sequence
-- `binned_barcode`: Binned barcode sequence
-- `hamming_distance`: Hamming distance between original and binned
+
+- `barcode`: Observed raw barcode sequence
+- `reads`: Number of reads with this barcode
 
 ### barcode_discovery_report.tsv
 Barcode discovery results (only when no barcode mode is specified, i.e., discovery mode).
@@ -167,7 +183,7 @@ Barcode discovery results (only when no barcode mode is specified, i.e., discove
 
 Located in `XPRESS_PROCESSING/expression/`:
 
-The same H5AD and MEX deliverables are moved to `outs/expression/` after report
+The same H5AD and MEX deliverables are exported to `outs/expression/` after report
 generation.
 
 ### MEX Format (Matrix Exchange)
@@ -356,35 +372,36 @@ Legacy/UMI-read AnnData output (if applicable).
 
 Located in `XPRESS_PROCESSING/stats/`:
 
-Key statistics tables and plots are moved to `outs/stats/`.
+Key statistics tables and plots are exported to `outs/stats/`.
 
-### qc_stats.tsv
+### `<project>.stats.tsv`
 Per-cell QC statistics.
 
 **Purpose**: Quality control metrics for each cell.
 
 **Format**: TSV with columns:
-- `cell_barcode`: Cell barcode
-- `total_reads`: Total reads for this cell
-- `mapped_reads`: Mapped reads
-- `mapping_ratio`: Fraction of mapped reads
-- `num_genes`: Number of genes detected
-- `num_umis`: Number of UMIs detected
-- `umi_fraction`: Fraction of reads with valid UMI
-- `exon_intron_ratio`: Fraction of reads mapping to exons/introns
+- `wellID`: Cell/well identifier
+- `internal_reads`, `umi_reads`, `all_reads`: Read totals
+- `MappingRatio`: Fraction assigned to mapped categories
+- `GenicRatio`: `(Exon_reads + intron_reads) / all_reads`
+- `ExonIntronRatio`: Legacy exon/intron quotient retained for compatibility
+- `UMIfrac`: UMI-read fraction
+- `Exon_umis`, `Intron_umis`, `Intron_Exon_umis`: UMI totals
+- `Exon_genes`, `Intron_genes`, `Intron_Exon_genes`: Detected gene totals
 
-### saturation_<downsample_level>.tsv
+### `<project>.saturation.tsv`
 Saturation analysis results at different downsampling levels.
 
 **Purpose**: Gene detection saturation analysis.
 
 **Format**: TSV with columns:
-- `downsample_level`: Number of reads downsampled to
-- `num_cells`: Number of cells detected
-- `num_genes_median`: Median number of genes per cell
-- `num_umis_median`: Median number of UMIs per cell
+- `Fraction`: Sampling fraction
+- `Seq_Saturation_Library`: Library-level sequencing saturation
+- `Seq_Saturation_Gene`: Gene-level sequencing saturation
+- `Median_Genes_UMI`: Median detected genes using UMI counts
+- `Median_Genes_Read`: Median detected genes using read counts
 
-### gene_body_coverage.tsv
+### `<project>.geneBodyCoverage.txt`
 RSeQC-like gene body coverage profile.
 
 **Purpose**: 5' to 3' coverage bias analysis. The pipeline selects the longest
@@ -399,15 +416,16 @@ All-read profile in the text/PDF outputs.
 - `UMI_Frac`, `Internal_Frac`, `All_Frac`: Fractional coverage profiles
 - `UMI_MaxNorm`, `Internal_MaxNorm`, `All_MaxNorm`: Max-normalized profiles used for plotting
 
-### q30_stats.tsv
+### `<project>.q30_stats.tsv`
 Base quality statistics.
 
 **Purpose**: Sequencing quality metrics.
 
 **Format**: TSV with columns:
-- `read_type`: Read type (R1, R2)
-- `q30_fraction`: Fraction of bases with Q30+
-- `mean_quality`: Mean base quality
+- `metric`: R1, R2, BC, UMI, or extracted cDNA category
+- `total_bases`: Number of observed bases
+- `q30_bases`: Number of bases with Q30+
+- `q30_rate`: Q30 fraction
 
 ### Plots (PNG/SVG)
 Generated plots (if `make_stats: yes`):
@@ -456,7 +474,7 @@ Barcode-corrected BAM files.
 
 Located in `XPRESS_PROCESSING/`:
 
-The final UB-corrected BAM and its index are moved to `outs/bam/`.
+The final UB-corrected BAM and its index are exported to `outs/bam/`.
 
 ### <project>.filtered.Aligned.GeneTagged.UBcorrected.sorted.bam
 Final UB-corrected sorted BAM file.
@@ -486,7 +504,7 @@ for read in bam:
 
 Located in `outs/`:
 
-### auto_report.html
+### `<project>_auto_plate_report.html`
 Automatic HTML report.
 
 **Purpose**: Quick quality assessment.
@@ -497,7 +515,7 @@ Automatic HTML report.
 - Mapping statistics
 - QC metrics
 
-### manual_report.html
+### `<project>_manual_report.html`
 Manual HTML report (more detailed).
 
 **Purpose**: In-depth analysis.
@@ -511,6 +529,20 @@ Manual HTML report (more detailed).
 - Detailed per-well statistics table
 
 **Usage**: Open in any modern web browser.
+
+### `run_manifest.json`
+
+Machine-readable completion record containing project status, MfsFlow and tool
+versions, reference paths, and an artifact inventory. SHA-256 checksums are
+included for files up to 64 MiB; larger files retain size metadata without an
+extra full-file checksum pass.
+
+### `diagnostics/`
+
+Contains snapshots of `pipeline.log`, `pipeline_timing.tsv`, stage success
+manifests, barcode discovery/binning outputs, BC statistics, and the top
+unmatched whitelist barcodes. Failed runs export only these diagnostics plus
+the partial report and `partial_run_manifest.json`.
 
 ## File Formats
 

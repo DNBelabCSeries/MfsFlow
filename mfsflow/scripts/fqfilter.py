@@ -10,6 +10,7 @@ import sys
 import subprocess
 import re
 import os
+import itertools
 
 try:
     from mfsflow.path_layout import tmp_merge_dir, load_config
@@ -86,23 +87,67 @@ def hamming_distance(s1, s2, limit=None):
                 return dist
     return dist
 
-def fastq_iter(handle):
+def fastq_iter(handle, source="<FASTQ>"):
+    record_number = 0
     while True:
         header = handle.readline()
-        if not header: break
-        seq = handle.readline().rstrip(b'\n\r')
-        _plus = handle.readline()
-        qual = handle.readline().rstrip(b'\n\r')
-        
+        if not header:
+            break
+        record_number += 1
+        seq_line = handle.readline()
+        plus = handle.readline()
+        qual_line = handle.readline()
+        if not seq_line or not plus or not qual_line:
+            raise ValueError(f"Incomplete FASTQ record {record_number} in {source}")
+        header = header.rstrip(b'\n\r')
+        seq = seq_line.rstrip(b'\n\r')
+        plus = plus.rstrip(b'\n\r')
+        qual = qual_line.rstrip(b'\n\r')
+        if not header.startswith(b'@'):
+            raise ValueError(f"Invalid FASTQ header at record {record_number} in {source}")
+        if not plus.startswith(b'+'):
+            raise ValueError(f"Invalid FASTQ separator at record {record_number} in {source}")
+        if not seq:
+            raise ValueError(f"Empty FASTQ sequence at record {record_number} in {source}")
         if len(seq) != len(qual):
-            sys.stderr.write(f"Warning: SEQ/QUAL length mismatch in {header.decode().strip()}: {len(seq)} vs {len(qual)}\n")
-            # Pad or truncate qual to match seq length to prevent crashes/offsets
-            if len(qual) < len(seq):
-                qual += b'#' * (len(seq) - len(qual))
-            else:
-                qual = qual[:len(seq)]
-                
-        yield header.rstrip(b'\n\r'), seq, qual
+            read_name = header.decode('ascii', errors='replace')
+            raise ValueError(
+                f"SEQ/QUAL length mismatch for {read_name} in {source}: "
+                f"{len(seq)} vs {len(qual)}"
+            )
+        yield header, seq, qual
+
+
+def _canonical_fastq_read_id(header):
+    read_id = header.split(None, 1)[0]
+    if read_id.startswith(b'@'):
+        read_id = read_id[1:]
+    if read_id.endswith((b'/1', b'/2')):
+        read_id = read_id[:-2]
+    return read_id
+
+
+def iter_synchronized_fastq(handles, sources=None):
+    """Yield synchronized FASTQ records and reject truncated or mismatched mates."""
+    sources = list(sources or [f"FASTQ[{index}]" for index in range(len(handles))])
+    iterators = [fastq_iter(handle, source) for handle, source in zip(handles, sources)]
+    sentinel = object()
+    for record_number, records in enumerate(itertools.zip_longest(*iterators, fillvalue=sentinel), 1):
+        if any(record is sentinel for record in records):
+            exhausted = [sources[index] for index, record in enumerate(records) if record is sentinel]
+            remaining = [sources[index] for index, record in enumerate(records) if record is not sentinel]
+            raise ValueError(
+                f"FASTQ mate count mismatch at record {record_number}; "
+                f"ended: {', '.join(exhausted)}; still has data: {', '.join(remaining)}"
+            )
+        if len(records) > 1:
+            read_ids = [_canonical_fastq_read_id(record[0]) for record in records]
+            if len(set(read_ids)) != 1:
+                labels = [read_id.decode('ascii', errors='replace') for read_id in read_ids]
+                raise ValueError(
+                    f"FASTQ mate ID mismatch at record {record_number}: {', '.join(labels)}"
+                )
+        yield records
 
 def main():
     import pysam
@@ -247,13 +292,13 @@ def main():
 
     def open_chunk_handle(f, pigz_procs):
         if direct_fastq:
+            if not os.path.exists(f):
+                return None
             if f.endswith('.gz'):
                 proc = subprocess.Popen([pigz, '-p', str(pigz_threads), '-dc', f], stdout=subprocess.PIPE, text=False, bufsize=1024*1024)
                 pigz_procs.append(proc)
                 return proc.stdout
-            if os.path.exists(f):
-                return open(f, 'rb')
-            return None
+            return open(f, 'rb')
 
         base_name = os.path.basename(f)
         if base_name.endswith('.gz'):
@@ -415,20 +460,24 @@ def main():
             pigz_procs = []
             handles = []
             try:
+                missing_files = []
+                source_labels = []
                 for f in group['files']:
                     handle = open_chunk_handle(f, pigz_procs)
                     if handle is None:
-                        handles = []
-                        break
-                    handles.append(handle)
+                        missing_files.append(f)
+                    else:
+                        handles.append(handle)
+                        source_labels.append(f if direct_fastq else f"{f}{tmp_prefix}")
 
-                if not handles:
-                    for p in pigz_procs:
-                        p.wait()
-                    continue
+                if missing_files:
+                    if not direct_fastq and len(missing_files) == len(group['files']):
+                        continue
+                    raise FileNotFoundError(
+                        f"Missing FASTQ mate/chunk for prefix {tmp_prefix}: {', '.join(missing_files)}"
+                    )
 
-                iters = [fastq_iter(h) for h in handles]
-                for records in zip(*iters):
+                for records in iter_synchronized_fastq(handles, source_labels):
                     if not process_records(records, group.get('fixed_bc')):
                         break
             finally:

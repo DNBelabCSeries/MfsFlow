@@ -33,10 +33,12 @@ mfsflow \
 ### Method 2: Generated YAML Configuration
 
 The CLI builds and writes `XPRESS_PROCESSING/config/run_config.yaml` from the
-command-line options before starting the pipeline. This generated file records
-the exact settings used for a run and is the configuration file consumed by
-stage resume commands internally. The current CLI does not accept a separate
-`--config` argument.
+command-line options before starting the pipeline. Resume mode loads this file
+directly and does not rebuild FASTQ groups or barcode tables:
+
+```bash
+mfsflow --resume --outdir /path/to/output --stage Mapping
+```
 
 See `mfsflow/yaml/example_config.yaml` (in source repo) for the available
 configuration fields.
@@ -393,7 +395,7 @@ upstream artifacts are missing or empty.
 
 ### Command-Line Equivalent
 - `--outdir /path/to/output` → `out_dir: /path/to/output`
-- `--stage Mapping` → `which_Stage: "Mapping"`
+- `--resume --stage Mapping` → reuse the saved config with `which_Stage: "Mapping"`
 
 ### Example
 ```yaml

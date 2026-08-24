@@ -6,10 +6,52 @@ gene-level quantification using featureCounts and generates digital
 gene expression (DGE) matrices from aligned BAM files.
 """
 
+import glob
 import os
+import shutil
 
 from mfsflow.fs_utils import remove_path
 from mfsflow.logging_utils import log_info
+from mfsflow.path_layout import expression_dir, stats_dir
+
+
+def _clear_previous_counting_outputs(runtime):
+    """Remove Counting and downstream outputs while preserving Mapping BAMs."""
+    project = runtime.project
+    analysis_dir = runtime.analysis_dir
+    candidates = []
+    candidates.extend(glob.glob(os.path.join(expression_dir(analysis_dir), f"{project}.*")))
+    candidates.extend(glob.glob(os.path.join(analysis_dir, f"{project}.filtered.Aligned.GeneTagged*")))
+    candidates.extend(
+        path
+        for path in glob.glob(os.path.join(analysis_dir, f"{project}.filtered.tagged.*.Aligned.out.bam.*"))
+        if not path.endswith((".bai", ".csi"))
+    )
+
+    stats_root = stats_dir(analysis_dir)
+    for suffix in (
+        ".read_stats.json",
+        ".saturation_dist.json",
+        ".gene_saturation_dist.json",
+        ".cell_matrix_stats.json",
+        ".stats.tsv",
+        ".saturation.tsv",
+        ".geneBodyCoverage.txt",
+        ".geneBodyCoverage.pdf",
+        ".features.pdf",
+    ):
+        candidates.append(os.path.join(stats_root, project + suffix))
+
+    removed = 0
+    for path in dict.fromkeys(candidates):
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+            removed += 1
+        elif os.path.isfile(path) or os.path.islink(path):
+            os.unlink(path)
+            removed += 1
+    if removed:
+        log_info(f"Removed {removed} stale Counting/Summarising artifact(s) before rerun.")
 
 
 def run_counting_stage(runtime, run_stage_cmd):
@@ -28,11 +70,10 @@ def run_counting_stage(runtime, run_stage_cmd):
     config = runtime.config
 
     log_info("Starting Counting Stage")
+    _clear_previous_counting_outputs(runtime)
 
     umi_aligned = os.path.join(analysis_dir, f"{project}.filtered.tagged.umi.Aligned.out.bam")
     int_aligned = os.path.join(analysis_dir, f"{project}.filtered.tagged.internal.Aligned.out.bam")
-    umi_to_tx = os.path.join(analysis_dir, f"{project}.filtered.tagged.umi.Aligned.toTranscriptome.out.bam")
-    int_to_tx = os.path.join(analysis_dir, f"{project}.filtered.tagged.internal.Aligned.toTranscriptome.out.bam")
 
     featurecounts_cmd = [
         python_exec,

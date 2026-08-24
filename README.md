@@ -166,17 +166,19 @@ output_directory/
 │   ├── intermediate/       # Temporary BAM and split FASTQ working files
 │   └── *.bam              # Final UB-corrected sorted BAM
 └── outs/                   # Final reports and customer-facing outputs
-    ├── auto_report.html    # Automatic report
-    ├── manual_report.html  # Manual report
+    ├── <project>_auto_plate_report.html  # Automatic report
+    ├── <project>_manual_report.html      # Manual report
     ├── expression/         # H5AD and MEX matrices
     ├── stats/              # QC tables and plots
     ├── bam/                # Final UB-corrected BAM and index
-    └── config/             # Run config and expected barcode table
+    ├── config/             # Run config and expected barcode table
+    ├── diagnostics/        # Logs, stage manifests, and barcode diagnostics
+    └── run_manifest.json   # Successful export completion record
 ```
 
 MfsFlow supports resuming interrupted runs from intermediate stages. After a run
-finishes and reports are generated, final deliverables are moved into `outs/`;
-use `outs/` as the completed result directory.
+finishes, final deliverables are exported into `outs/` while the working artifacts
+remain in `XPRESS_PROCESSING/` for validation and recovery.
 
 Before each run, MfsFlow checks Python dependencies, required external tools,
 disk space, reference integrity, and resume-stage inputs. Successful stages
@@ -189,14 +191,14 @@ write artifact manifests and `.success` markers under
 
 ```bash
 mfsflow \
-  --fastqs /path/to/fastq_dir \
-  --genomeDir /path/to/reference \
-  --sample SAMPLE_NAME \
-  --plate 1 \
   --outdir /path/to/output \
-  --threads 20 \
+  --resume \
   --stage Mapping
 ```
+
+Resume always reuses the saved inputs, barcode table, reference, and analytical
+parameters from `XPRESS_PROCESSING/config/run_config.yaml`. `--threads` and
+`--tmpRoot` may be supplied to change execution resources only.
 
 Available stages: `Filtering`, `Mapping`, `Counting`, `Summarising`
 

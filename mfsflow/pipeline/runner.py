@@ -13,6 +13,7 @@ import sys
 import yaml
 
 from mfsflow.commands import run_stage_cmd as run_timed_stage_cmd
+from mfsflow.config import persist_run_config
 from mfsflow.logging_utils import Tee, log_info
 from mfsflow.preflight import run_preflight
 from mfsflow.runtime import PipelineRuntime
@@ -54,6 +55,7 @@ def run_pipeline_stages(yaml_file):
             log_info("Running preflight checks...")
             with timer.section("Preflight"):
                 run_preflight(config, runtime)
+            persist_run_config(runtime.config, runtime.yaml_file)
             log_info("Preflight checks passed.")
 
             start_index = STAGE_ORDER.index(which_stage)
@@ -73,6 +75,7 @@ def run_pipeline_stages(yaml_file):
 
             if which_stage == "Filtering":
                 umi_chunks, int_chunks = run_filtering_stage(runtime, timer, run_stage_cmd, run_log)
+                persist_run_config(runtime.config, runtime.yaml_file)
                 manifest = record_stage_success(runtime, FILTERING)
                 log_info(f"Filtering artifact manifest: {manifest}")
 

@@ -7,7 +7,6 @@ single-cell RNA sequencing data.
 """
 
 import sys
-import os
 try:
     import pysam
 except ImportError:
@@ -52,6 +51,11 @@ def main():
     # Open Output (Standard Output) - initialized on first file
     outfile = None
 
+    input_reads = 0
+    output_reads = 0
+    filtered_reads = 0
+    broken_pipe = False
+
     try:
         for bam_path in args.bam_files:
             # Handle '-' for stdin
@@ -62,8 +66,8 @@ def main():
 
             try:
                 infile = pysam.AlignmentFile(f_obj, "rb", check_sq=False)
-            except ValueError:
-                continue
+            except Exception as exc:
+                raise RuntimeError(f"Unable to open input BAM {bam_path}: {exc}") from exc
 
             # Initialize output using header from first file
             # Output BAM (binary) to stdout; STAR reads it via --readFilesCommand samtools view.
@@ -72,47 +76,66 @@ def main():
                 try:
                     # Mode "wb" = BAM binary. File "-" = stdout.
                     outfile = pysam.AlignmentFile("-", "wb", template=infile)
-                except (BrokenPipeError, IOError):
+                except (BrokenPipeError, IOError) as exc:
                     infile.close()
-                    return
+                    if isinstance(exc, BrokenPipeError) or getattr(exc, "errno", None) == 32:
+                        return 141
+                    raise
 
             try:
                 for read in infile:
+                    input_reads += 1
                     try:
                         correction = get_or_apply_correction(read, bc_map, id_map, internal_bcs)
                         if correction is None:
                             if target_type == 'umi':
                                 outfile.write(read)
+                                output_reads += 1
+                            else:
+                                filtered_reads += 1
                             continue
 
                         # Filter Logic: Only output if matches target type
                         if target_type == 'umi' and correction.is_internal:
+                            filtered_reads += 1
                             continue
                         if target_type == 'internal' and not correction.is_internal:
+                            filtered_reads += 1
                             continue
 
                         outfile.write(read)
+                        output_reads += 1
 
                     except (BrokenPipeError, IOError) as e:
-                        if getattr(e, "errno", None) == 32: # EPIPE
-                            break
-                        else:
-                            raise
-                    except Exception:
-                        if target_type == 'umi':
-                            outfile.write(read)
+                        if isinstance(e, BrokenPipeError) or getattr(e, "errno", None) == 32:
+                            raise BrokenPipeError("STAR closed the correction stream early") from e
+                        raise
+                    except Exception as exc:
+                        read_name = getattr(read, "query_name", "<unknown>")
+                        raise RuntimeError(f"Barcode correction failed for read {read_name}: {exc}") from exc
             
             finally:
                 infile.close()
 
-    except (BrokenPipeError, KeyboardInterrupt):
-        pass
+    except BrokenPipeError:
+        broken_pipe = True
+    except KeyboardInterrupt:
+        return 130
     finally:
         if outfile:
             try:
                 outfile.close()
-            except (BrokenPipeError, IOError):
-                pass
+            except (BrokenPipeError, IOError) as exc:
+                if isinstance(exc, BrokenPipeError) or getattr(exc, "errno", None) == 32:
+                    broken_pipe = True
+                else:
+                    raise
+
+    sys.stderr.write(
+        f"stream_corrector summary: input={input_reads}, output={output_reads}, "
+        f"filtered={filtered_reads}, type={target_type}\n"
+    )
+    return 141 if broken_pipe else 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

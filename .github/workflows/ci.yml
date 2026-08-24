@@ -39,6 +39,9 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q mfsflow tests
 
+      - name: Check patch formatting
+        run: git diff --check
+
       - name: Check CLI and bundled tools
         run: |
           python -m mfsflow.cli --version
@@ -48,6 +51,11 @@ jobs:
           test -x mfsflow/software/pigz
           test -x mfsflow/software/samtools
           test -x mfsflow/software/seqkit
+          mfsflow/software/STAR --version
+          mfsflow/software/featureCounts -v
+          mfsflow/software/pigz --version
+          mfsflow/software/samtools --version
+          mfsflow/software/seqkit version
 
   package:
     name: Build and inspect wheel

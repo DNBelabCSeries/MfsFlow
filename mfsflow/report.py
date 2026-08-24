@@ -10,16 +10,19 @@ import json
 import csv
 import statistics
 import gzip
+import hashlib
+import html
 import logging
 import shutil
 import base64
 import os
+from datetime import datetime
 from pathlib import Path
 from string import Template
 import re
 
 from mfsflow import __version__
-from mfsflow.path_layout import barcode_dir, config_dir, expression_dir, outputs_dir, stats_dir
+from mfsflow.path_layout import config_dir, expression_dir, outputs_dir, stats_dir
 
 logger = logging.getLogger(__name__)
 
@@ -274,14 +277,55 @@ def _configured_read_length(config, file_key):
     return _max_end_from_base_definition(entry.get("base_definition", []))
 
 
-def _load_q30_rows(sample_outdir):
-    candidates = list(Path(stats_dir(str(sample_outdir))).glob("*.q30_stats.tsv"))
+def _resolve_project_artifact(sample_outdir, project, relative_dir, suffix):
+    """Resolve a project artifact exactly, with an unambiguous legacy fallback."""
+    root = Path(sample_outdir)
+    base = root / relative_dir if relative_dir else root
+    project = str(project or "").strip()
+    if project:
+        exact = base / f"{project}{suffix}"
+        if exact.is_file():
+            return exact
+
+        # Older layouts occasionally placed the same project-named artifact in
+        # another subdirectory. Never fall back to a different project's file.
+        candidates = sorted(path for path in root.rglob(f"{project}{suffix}") if path.is_file())
+        candidates = list(dict.fromkeys(candidates))
+        if len(candidates) == 1:
+            logger.warning("Using legacy artifact location for project %s: %s", project, candidates[0])
+            return candidates[0]
+        if len(candidates) > 1:
+            logger.warning(
+                "Refusing ambiguous artifact selection for project %s and suffix %s: %s",
+                project,
+                suffix,
+                ", ".join(str(path) for path in candidates),
+            )
+        return None
+
+    candidates = sorted(path for path in base.glob(f"*{suffix}") if path.is_file()) if base.exists() else []
     if not candidates:
-        candidates = list(Path(sample_outdir).rglob("*.q30_stats.tsv"))
-    if not candidates:
+        candidates = sorted(path for path in root.rglob(f"*{suffix}") if path.is_file())
+    candidates = list(dict.fromkeys(candidates))
+    if len(candidates) == 1:
+        logger.warning("Using legacy unscoped artifact for project %s: %s", project or "<unknown>", candidates[0])
+        return candidates[0]
+    if len(candidates) > 1:
+        logger.warning(
+            "Refusing ambiguous artifact selection for project %s and suffix %s: %s",
+            project or "<unknown>",
+            suffix,
+            ", ".join(str(path) for path in candidates),
+        )
+    return None
+
+
+def _load_q30_rows(sample_outdir, project=""):
+    path = _resolve_project_artifact(sample_outdir, project, "stats", ".q30_stats.tsv")
+    if path is None:
         return {}
     rows = {}
-    with open(candidates[0], "r", encoding="utf-8", errors="ignore", newline="") as handle:
+    with open(path, "r", encoding="utf-8", errors="ignore", newline="") as handle:
         for row in csv.DictReader(handle, delimiter="\t"):
             metric = str(row.get("metric") or "").strip()
             if not metric:
@@ -294,37 +338,28 @@ def _load_q30_rows(sample_outdir):
     return rows
 
 
-def _sum_bcstats_reads(sample_outdir):
-    candidates = [Path(sample_outdir) / f"{Path(sample_outdir).name}.BCstats.txt"]
-    candidates.extend(sorted(Path(sample_outdir).glob("*.BCstats.txt")))
-    candidates.extend(sorted(Path(sample_outdir).rglob("*.BCstats.txt")))
-    seen = set()
-    for path in candidates:
-        if path in seen or not path.exists() or not path.is_file():
-            continue
-        seen.add(path)
-        total = 0
-        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                parts = line.strip().split()
-                if len(parts) < 2:
-                    continue
-                try:
-                    total += int(parts[1])
-                except Exception:
-                    continue
-        if total > 0:
-            return total
-    return None
+def _sum_bcstats_reads(sample_outdir, project=""):
+    path = _resolve_project_artifact(sample_outdir, project, "", ".BCstats.txt")
+    if path is None:
+        return None
+    total = 0
+    with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            try:
+                total += int(parts[1])
+            except Exception:
+                continue
+    return total if total > 0 else None
 
 
-def _load_read_stats_json(sample_outdir):
-    candidates = list(Path(stats_dir(str(sample_outdir))).glob("*.read_stats.json"))
-    if not candidates:
-        candidates = list(Path(sample_outdir).rglob("*.read_stats.json"))
-    if not candidates:
+def _load_read_stats_json(sample_outdir, project=""):
+    path = _resolve_project_artifact(sample_outdir, project, "stats", ".read_stats.json")
+    if path is None:
         return {}
-    with open(candidates[0], "r", encoding="utf-8", errors="ignore") as handle:
+    with open(path, "r", encoding="utf-8", errors="ignore") as handle:
         data = json.load(handle)
     return data.get("read_stats", {}) or {}
 
@@ -492,11 +527,17 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
             bucket["umis"].append(umi_val)
 
         expected = expected_by_well.get(well, {})
-        # Calculate UMI fraction and exon/intron ratio for manual report.
+        # Calculate the genic fraction used by the report. ExonIntronRatio is
+        # retained separately as the legacy exon/intron quotient.
         umi_fraction = (umi / all_reads) if all_reads and all_reads > 0 else None
         exon_r = _to_float(row.get("Exon_reads")) or 0.0
         intron_r = _to_float(row.get("intron_reads")) or _to_float(row.get("Intron_reads")) or 0.0
-        exon_intron_ratio = ((exon_r + intron_r) / all_reads) if all_reads and all_reads > 0 else None
+        genic_ratio = _to_float(row.get("GenicRatio"))
+        if genic_ratio is None:
+            genic_ratio = ((exon_r + intron_r) / all_reads) if all_reads and all_reads > 0 else None
+        exon_intron_ratio = _to_float(row.get("ExonIntronRatio"))
+        if exon_intron_ratio is None:
+            exon_intron_ratio = (exon_r / intron_r) if intron_r > 0 else None
         manual_rows.append({
             "wellID": well,
             "internal_barcodes": expected.get("internal_barcodes") or row.get("internal_barcodes") or "",
@@ -515,6 +556,8 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
             "Intron_reads": intron_r,
             "ExonIntronRatio": exon_intron_ratio,
             "exon_intron_ratio": exon_intron_ratio,
+            "GenicRatio": genic_ratio,
+            "genic_ratio": genic_ratio,
         })
 
     if expected_rows:
@@ -580,18 +623,9 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
     combined_context["auto_plate_summary_data"] = json.dumps(plate_rows)
 
 
-def _read_discovered_sample_type(sample_outdir):
-    candidates = []
-    try:
-        bc_dir = Path(barcode_dir(sample_outdir))
-        candidates.extend(sorted(bc_dir.glob("*.barcode_discovery.tsv")))
-    except Exception:
-        pass
-    if not candidates:
-        try:
-            candidates.extend(sorted(Path(sample_outdir).rglob("*.barcode_discovery.tsv")))
-        except Exception:
-            pass
+def _read_discovered_sample_type(sample_outdir, project=""):
+    path = _resolve_project_artifact(sample_outdir, project, "barcodes", ".barcode_discovery.tsv")
+    candidates = [path] if path is not None else []
 
     for path in candidates:
         in_summary = False
@@ -636,7 +670,7 @@ def _select_report_template(sample_type, sample_outdir, template_dir, config=Non
     elif sample_type in ("auto", "manual"):
         report_mode = sample_type
     elif sample_type == "discover":
-        report_mode = _read_discovered_sample_type(sample_outdir) or "auto"
+        report_mode = _read_discovered_sample_type(sample_outdir, (config or {}).get("project")) or "auto"
     else:
         report_mode = "manual"
 
@@ -740,27 +774,50 @@ def create_report_directories(sample_outdir, _config=None):
     return outs_dir
 
 
-def _move_file_if_exists(src, dst):
+def _copy_or_link(src, dst):
+    """Hard-link a file when possible, falling back to a metadata-preserving copy."""
+    try:
+        os.link(str(src), str(dst))
+    except OSError:
+        shutil.copy2(str(src), str(dst))
+    return str(dst)
+
+
+def _export_file_if_exists(src, dst):
     src = Path(src)
     dst = Path(dst)
     if not src.exists() or not src.is_file():
         return False
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        dst.unlink()
-    shutil.move(str(src), str(dst))
+    temporary = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
+    try:
+        if temporary.exists():
+            temporary.unlink()
+        _copy_or_link(src, temporary)
+        os.replace(temporary, dst)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
     return True
 
 
-def _move_tree_if_exists(src, dst):
+def _export_tree_if_exists(src, dst):
     src = Path(src)
     dst = Path(dst)
     if not src.exists() or not src.is_dir():
         return False
-    if dst.exists():
-        shutil.rmtree(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(dst))
+    temporary = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    try:
+        shutil.copytree(src, temporary, copy_function=_copy_or_link)
+        if dst.exists():
+            shutil.rmtree(dst)
+        os.replace(temporary, dst)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
     return True
 
 
@@ -768,15 +825,15 @@ def export_deliverables_to_outs(sample_outdir, outs_dir, project):
     sample_outdir = Path(sample_outdir)
     outs_dir = Path(outs_dir)
     project = str(project or "").strip()
-    moved = []
+    exported_paths = []
 
     expression_out = Path(expression_dir(str(sample_outdir)))
     if expression_out.exists():
-        for h5ad in sorted(expression_out.glob("*.h5ad")):
+        for h5ad in sorted(expression_out.glob(f"{project}.h5ad")):
             dst = outs_dir / "expression" / h5ad.name
-            if _move_file_if_exists(h5ad, dst):
-                moved.append(str(dst))
-        for mex_dir in sorted(expression_out.iterdir()):
+            if _export_file_if_exists(h5ad, dst):
+                exported_paths.append(str(dst))
+        for mex_dir in sorted(expression_out.glob(f"{project}.*")):
             if not mex_dir.is_dir():
                 continue
             if (
@@ -785,27 +842,22 @@ def export_deliverables_to_outs(sample_outdir, outs_dir, project):
                 and (mex_dir / "barcodes.tsv.gz").exists()
             ):
                 dst = outs_dir / "expression" / mex_dir.name
-                if _move_tree_if_exists(mex_dir, dst):
-                    moved.append(str(dst))
+                if _export_tree_if_exists(mex_dir, dst):
+                    exported_paths.append(str(dst))
 
     stats_out = Path(stats_dir(str(sample_outdir)))
     if stats_out.exists():
-        for pattern in ("*.stats.tsv", "*.saturation.tsv", "*.read_stats.json", "*.q30_stats.tsv", "*.pdf", "*.png", "*.svg"):
-            for src in sorted(stats_out.glob(pattern)):
-                dst = outs_dir / "stats" / src.name
-                if _move_file_if_exists(src, dst):
-                    moved.append(str(dst))
+        for src in sorted(stats_out.glob(f"{project}.*")):
+            if not src.is_file():
+                continue
+            dst = outs_dir / "stats" / src.name
+            if _export_file_if_exists(src, dst):
+                exported_paths.append(str(dst))
 
-    bam_patterns = []
-    if project:
-        bam_patterns.extend([
-            f"{project}.filtered.Aligned.GeneTagged.UBcorrected.sorted.bam*",
-            f"{project}.filtered.Aligned.GeneTagged.UBcorrected.bam*",
-        ])
-    bam_patterns.extend([
-        "*.filtered.Aligned.GeneTagged.UBcorrected.sorted.bam*",
-        "*.filtered.Aligned.GeneTagged.UBcorrected.bam*",
-    ])
+    bam_patterns = [
+        f"{project}.filtered.Aligned.GeneTagged.UBcorrected.sorted.bam*",
+        f"{project}.filtered.Aligned.GeneTagged.UBcorrected.bam*",
+    ]
     seen = set()
     for pattern in bam_patterns:
         for src in sorted(sample_outdir.glob(pattern)):
@@ -813,27 +865,142 @@ def export_deliverables_to_outs(sample_outdir, outs_dir, project):
                 continue
             seen.add(src)
             dst = outs_dir / "bam" / src.name
-            if _move_file_if_exists(src, dst):
-                moved.append(str(dst))
+            if _export_file_if_exists(src, dst):
+                exported_paths.append(str(dst))
 
     cfg_out = Path(config_dir(str(sample_outdir)))
     if cfg_out.exists():
         for pattern in ("run_config.yaml", "expect_id_barcode.tsv"):
             for src in sorted(cfg_out.glob(pattern)):
                 dst = outs_dir / "config" / src.name
-                if _move_file_if_exists(src, dst):
-                    moved.append(str(dst))
+                if _export_file_if_exists(src, dst):
+                    exported_paths.append(str(dst))
 
-    logger.info(f"Moved {len(moved)} deliverable file(s)/dir(s) to: {outs_dir}")
-    return moved
+    exported = {os.path.abspath(path) for path in exported_paths}
+    stale_candidates = []
+    for category in ("expression", "stats", "bam"):
+        category_dir = outs_dir / category
+        if category_dir.exists():
+            stale_candidates.extend(category_dir.glob(f"{project}.*"))
+    for stale in stale_candidates:
+        if os.path.abspath(str(stale)) in exported:
+            continue
+        if stale.is_dir():
+            shutil.rmtree(stale)
+        elif stale.is_file():
+            stale.unlink()
+
+    logger.info(f"Exported {len(exported_paths)} deliverable file(s)/dir(s) to: {outs_dir}")
+    return exported_paths
+
+
+def _copy_snapshot_file(src, dst):
+    src = Path(src)
+    dst = Path(dst)
+    if not src.is_file():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    temporary = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copy2(src, temporary)
+        os.replace(temporary, dst)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return True
+
+
+def export_diagnostics_to_outs(sample_outdir, outs_dir, project, include_config=False):
+    """Copy a stable diagnostic snapshot without modifying resume inputs."""
+    sample_outdir = Path(sample_outdir)
+    outs_dir = Path(outs_dir)
+    diagnostic_root = outs_dir / "diagnostics"
+    copied = []
+
+    fixed_files = [
+        (sample_outdir / "logs" / "pipeline.log", diagnostic_root / "logs" / "pipeline.log"),
+        (sample_outdir / "logs" / "pipeline_timing.tsv", diagnostic_root / "logs" / "pipeline_timing.tsv"),
+        (sample_outdir / f"{project}.BCstats.txt", diagnostic_root / "barcodes" / f"{project}.BCstats.txt"),
+    ]
+    for src, dst in fixed_files:
+        if _copy_snapshot_file(src, dst):
+            copied.append(str(dst))
+
+    stage_dir = sample_outdir / "logs" / "stages"
+    if stage_dir.exists():
+        for src in sorted(stage_dir.iterdir()):
+            dst = diagnostic_root / "stages" / src.name
+            if _copy_snapshot_file(src, dst):
+                copied.append(str(dst))
+
+    barcode_output = sample_outdir / "barcodes"
+    if barcode_output.exists():
+        for src in sorted(barcode_output.glob(f"{project}.*")):
+            dst = diagnostic_root / "barcodes" / src.name
+            if _copy_snapshot_file(src, dst):
+                copied.append(str(dst))
+
+    if include_config:
+        for name in ("run_config.yaml", "expect_id_barcode.tsv"):
+            src = sample_outdir / "config" / name
+            dst = diagnostic_root / "config" / name
+            if _copy_snapshot_file(src, dst):
+                copied.append(str(dst))
+    logger.info("Exported %d diagnostic file(s) to: %s", len(copied), diagnostic_root)
+    return copied
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_run_manifest(outs_dir, project, config, status, report_path):
+    """Write a machine-readable inventory and provenance record for exported outputs."""
+    outs_dir = Path(outs_dir)
+    manifest_name = "run_manifest.json" if status == "success" else "partial_run_manifest.json"
+    manifest_path = outs_dir / manifest_name
+    artifacts = []
+    checksum_limit = 64 * 1024 * 1024
+    for path in sorted(item for item in outs_dir.rglob("*") if item.is_file()):
+        if path == manifest_path or path.name.endswith(".tmp"):
+            continue
+        size = path.stat().st_size
+        artifacts.append({
+            "path": str(path.relative_to(outs_dir)),
+            "size_bytes": size,
+            "sha256": _file_sha256(path) if size <= checksum_limit else None,
+            "checksum_note": None if size <= checksum_limit else "omitted for files larger than 64 MiB",
+        })
+    payload = {
+        "schema_version": 1,
+        "project": project,
+        "status": status,
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "mfsflow_version": __version__,
+        "report": Path(report_path).name,
+        "analysis_error": config.get("_analysis_error") if status != "success" else None,
+        "tool_versions": config.get("tool_versions", {}),
+        "reference": config.get("reference", {}),
+        "artifacts": artifacts,
+    }
+    temporary = manifest_path.with_name(f".{manifest_path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+        os.replace(temporary, manifest_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return manifest_path
 
 def calculate_summary_metrics(sample_outdir, project=""):
     """
     Calculate summary metrics from stats.tsv
     """
-    stats_tsv = list(Path(stats_dir(str(sample_outdir))).glob('*.stats.tsv'))
-    if not stats_tsv:
-        stats_tsv = list(sample_outdir.rglob('*.stats.tsv'))
+    stats_path = _resolve_project_artifact(sample_outdir, project, "stats", ".stats.tsv")
         
     metrics = {
         "rna_estm_Num_cell": "",
@@ -847,7 +1014,7 @@ def calculate_summary_metrics(sample_outdir, project=""):
         "rna_species": "Unknown",
     }
     
-    if not stats_tsv:
+    if stats_path is None:
         logger.warning("No stats.tsv found for summary metrics.")
         return metrics
         
@@ -869,7 +1036,6 @@ def calculate_summary_metrics(sample_outdir, project=""):
             return ""
 
     try:
-        stats_path = stats_tsv[0]
         with open(stats_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
             reader = csv.DictReader(f, delimiter="\t")
             rows = [_normalize_stats_record(r) for r in reader if r]
@@ -1000,15 +1166,16 @@ def _process_sequencing_quality_data(sample_outdir, combined_context):
     combined_context["sequencing_quality_summary_data"] = "[]"
     try:
         config = combined_context.get("_run_config", {}) or {}
-        q30_rows = _load_q30_rows(sample_outdir)
-        read_stats = _load_read_stats_json(sample_outdir)
+        project = config.get("project", "")
+        q30_rows = _load_q30_rows(sample_outdir, project)
+        read_stats = _load_read_stats_json(sample_outdir, project)
 
         total_reads, valid_bc_reads, unused_bc_reads, valid_bc_rate = _barcode_read_counts_from_read_stats(read_stats)
         if total_reads is None:
             r1_len = _configured_read_length(config, "file1")
             r1_total_bases = (q30_rows.get("R1") or {}).get("total_bases")
             total_reads = int(round(r1_total_bases / r1_len)) if r1_len and r1_total_bases else None
-            valid_bc_reads = _sum_bcstats_reads(sample_outdir)
+            valid_bc_reads = _sum_bcstats_reads(sample_outdir, project)
             unused_bc_reads = (total_reads - valid_bc_reads) if total_reads is not None and valid_bc_reads is not None else None
             valid_bc_rate = (valid_bc_reads / total_reads) if total_reads and valid_bc_reads is not None else None
 
@@ -1039,13 +1206,11 @@ def _process_rna_stats_table_data(sample_outdir, combined_context):
     combined_context['rna_stats_table_data'] = '[]'
     combined_context['rna_stats_table_available'] = False
     try:
-        candidates = list(Path(stats_dir(str(sample_outdir))).glob('*.stats.tsv'))
-        if not candidates:
-            candidates = list(sample_outdir.rglob('*.stats.tsv'))
-        if not candidates:
+        project = (combined_context.get("_run_config", {}) or {}).get("project", "")
+        stats_path = _resolve_project_artifact(sample_outdir, project, "stats", ".stats.tsv")
+        if stats_path is None:
             return
 
-        stats_path = candidates[0]
         with open(stats_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
             reader = csv.DictReader(f, delimiter="\t")
             records = [_normalize_stats_record(r) for r in reader if r]
@@ -1061,13 +1226,11 @@ def _process_rna_gene_body_coverage_data(sample_outdir, combined_context):
     combined_context['rna_gene_body_all_maxnorm'] = '[]'
     combined_context['rna_gene_body_coverage_available'] = False
     try:
-        candidates = list(Path(stats_dir(str(sample_outdir))).glob('*.geneBodyCoverage.txt'))
-        if not candidates:
-            candidates = list(sample_outdir.rglob('*.geneBodyCoverage.txt'))
-        if not candidates:
+        project = (combined_context.get("_run_config", {}) or {}).get("project", "")
+        gb_path = _resolve_project_artifact(sample_outdir, project, "stats", ".geneBodyCoverage.txt")
+        if gb_path is None:
             return
 
-        gb_path = candidates[0]
         x_vals = []
         umi_vals = []
         internal_vals = []
@@ -1101,12 +1264,10 @@ def _process_rna_read_distribution_data(sample_outdir, combined_context):
     combined_context['rna_read_distribution_bar_data'] = '{}'
     combined_context['rna_read_distribution_box_data'] = '{}'
     try:
-        candidates = list(Path(stats_dir(str(sample_outdir))).glob('*.read_stats.json'))
-        if not candidates:
-            candidates = list(sample_outdir.rglob('*.read_stats.json'))
         read_stats = {}
-        if candidates:
-            stats_path = candidates[0]
+        project = (combined_context.get("_run_config", {}) or {}).get("project", "")
+        stats_path = _resolve_project_artifact(sample_outdir, project, "stats", ".read_stats.json")
+        if stats_path is not None:
             with open(stats_path, 'r', encoding='utf-8') as f:
                 stats_json = json.load(f)
             read_stats = stats_json.get('read_stats', {}) or {}
@@ -1181,11 +1342,9 @@ def _process_rna_saturation_data(sample_outdir, combined_context):
         combined_context['rna_saturation_median_genes_read'] = '[]'
         combined_context['rna_saturation_available'] = False
 
-        candidates = list(Path(stats_dir(str(sample_outdir))).glob('*.saturation.tsv'))
-        if not candidates:
-            candidates = list(sample_outdir.rglob('*.saturation.tsv'))
-        if candidates:
-            sat_path = candidates[0]
+        project = (combined_context.get("_run_config", {}) or {}).get("project", "")
+        sat_path = _resolve_project_artifact(sample_outdir, project, "stats", ".saturation.tsv")
+        if sat_path is not None:
             frac_vals = []
             sat_lib_pct = []
             sat_gene_pct = []
@@ -1273,13 +1432,16 @@ def generate_multi_report(name, outdir, config):
     combined_context["vdj_b_target_enabled"] = "false"
     combined_context["fastq_display_html"] = ""
     combined_context["logo_data_uri"] = _load_logo_data_uri(template_dir)
-    combined_context["analysis_status_html"] = (
-        '<section class="analysis-warning"><strong>Incomplete analysis:</strong> '
-        'the pipeline failed before all stages finished. This partial report only '
-        'contains outputs completed before the failure. Check logs/pipeline.log.</section>'
-        if config.get("_analysis_failed")
-        else ""
-    )
+    if config.get("_analysis_failed"):
+        error_text = str(config.get("_analysis_error") or "Unknown pipeline error")
+        combined_context["analysis_status_html"] = (
+            '<section class="analysis-warning"><strong>Incomplete analysis:</strong> '
+            'the pipeline failed before all stages finished. This partial report only '
+            'contains outputs completed before the failure. '
+            f'<br><strong>Last error:</strong> {html.escape(error_text)}</section>'
+        )
+    else:
+        combined_context["analysis_status_html"] = ""
 
     # Add input CSV and config parameters
     combined_context['input_csv_data'] = config.get('csv_content', '')
@@ -1317,35 +1479,55 @@ def generate_multi_report(name, outdir, config):
         if key not in combined_context:
             combined_context[key] = _default_placeholder_value(key)
 
+    report_html = template.safe_substitute(combined_context)
+
+    sample_type = combined_context.get("sample_type") or "analysis"
+    if config.get("_analysis_failed"):
+        report_suffix = "partial_report"
+    elif sample_type == "auto":
+        report_suffix = "auto_plate_report"
+    elif sample_type == "manual":
+        report_suffix = "manual_report"
+    elif sample_type == "custom":
+        report_suffix = "custom_barcode_report"
+    else:
+        report_suffix = "analysis_report"
+    out_file = outs_dir / f'{name}_{report_suffix}.html'
+    tmp_file = out_file.with_suffix(out_file.suffix + ".tmp")
     try:
-        report_html = template.safe_substitute(combined_context)
+        with open(tmp_file, 'w', encoding='utf-8') as f:
+            f.write(report_html)
+            f.flush()
+            os.fsync(f.fileno())
 
-        sample_type = combined_context.get("sample_type") or "analysis"
-        if sample_type == "auto":
-            report_suffix = "auto_plate_report"
-        elif sample_type == "manual":
-            report_suffix = "manual_report"
-        elif sample_type == "custom":
-            report_suffix = "custom_barcode_report"
-        else:
-            report_suffix = "analysis_report"
-        out_file = outs_dir / f'{name}_{report_suffix}.html'
-        tmp_file = out_file.with_suffix(out_file.suffix + ".tmp")
-        try:
-            with open(tmp_file, 'w', encoding='utf-8') as f:
-                f.write(report_html)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_file, out_file)
-        finally:
-            if tmp_file.exists():
-                tmp_file.unlink()
-
-        logger.info(f"HTML report saved to: {out_file}")
-        logger.info("HTML report generation complete.")
-        return out_file
-    finally:
-        try:
+        if not config.get("_analysis_failed"):
+            # run_manifest.json is the completion marker. Remove the previous
+            # marker before touching exported data so an interrupted refresh
+            # cannot be mistaken for a fully published run.
+            success_manifest = outs_dir / "run_manifest.json"
+            if success_manifest.exists():
+                success_manifest.unlink()
             export_deliverables_to_outs(sample_outdir, outs_dir, name)
-        except Exception as e:
-            logger.warning(f"Failed to export deliverables to outs: {e}")
+            export_diagnostics_to_outs(sample_outdir, outs_dir, name)
+            os.replace(tmp_file, out_file)
+            for stale_report in outs_dir.glob(f"{name}_*_report.html"):
+                if stale_report != out_file:
+                    stale_report.unlink()
+            partial_manifest = outs_dir / "partial_run_manifest.json"
+            if partial_manifest.exists():
+                partial_manifest.unlink()
+            write_run_manifest(outs_dir, name, config, "success", out_file)
+        else:
+            # A partial report is useful even if copying diagnostics later
+            # fails, and it never replaces the last successful report.
+            os.replace(tmp_file, out_file)
+            export_diagnostics_to_outs(sample_outdir, outs_dir, name, include_config=True)
+            write_run_manifest(outs_dir, name, config, "failed", out_file)
+            logger.info("Analysis is incomplete; only diagnostic snapshots were exported.")
+    finally:
+        if tmp_file.exists():
+            tmp_file.unlink()
+
+    logger.info(f"HTML report saved to: {out_file}")
+    logger.info("HTML report generation complete.")
+    return out_file

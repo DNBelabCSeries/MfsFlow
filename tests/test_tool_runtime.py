@@ -58,7 +58,9 @@ class ToolRuntimeTests(unittest.TestCase):
             tool.chmod(0o755)
 
             config = {"samtools_exec": "samtools"}
-            resolved = resolve_config_tool_paths(config, tmpdir)
+            with mock.patch("mfsflow.tool_runtime.sys.platform", "linux"), \
+                 mock.patch("mfsflow.tool_runtime.platform.machine", return_value="x86_64"):
+                resolved = resolve_config_tool_paths(config, tmpdir)
 
             self.assertEqual(resolved["samtools_exec"], str(tool))
 
@@ -96,12 +98,41 @@ class ToolRuntimeTests(unittest.TestCase):
                 "performance_opts": {"tool_cache": os.path.join(tmpdir, "tool-cache")},
             }
 
-            with mock.patch("mfsflow.tool_runtime.Path.chmod", side_effect=PermissionError("read-only")):
+            with mock.patch("mfsflow.tool_runtime.sys.platform", "linux"), \
+                 mock.patch("mfsflow.tool_runtime.platform.machine", return_value="x86_64"), \
+                 mock.patch("mfsflow.tool_runtime.Path.chmod", side_effect=PermissionError("read-only")):
                 PipelineRuntime.from_config(config, str(yaml_file))
 
             config_text = yaml_file.read_text(encoding="utf-8")
             self.assertIn("tool-cache", config_text)
             self.assertNotIn(f"samtools_exec: {tool}", config_text)
+
+    def test_non_linux_platform_does_not_select_packaged_elf_tools(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            software = Path(tmpdir) / "software"
+            software.mkdir()
+            tool = software / "samtools"
+            tool.write_bytes(b"ELF")
+            tool.chmod(0o755)
+
+            with mock.patch("mfsflow.tool_runtime.sys.platform", "darwin"), \
+                 mock.patch("mfsflow.tool_runtime.platform.machine", return_value="arm64"):
+                resolved = resolve_config_tool_paths({"samtools_exec": "samtools"}, tmpdir)
+
+            self.assertEqual(resolved["samtools_exec"], "samtools")
+
+    def test_unrepairable_explicit_path_falls_back_to_path_command(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = Path(tmpdir) / "broken-samtools"
+            tool.write_bytes(b"tool")
+
+            with mock.patch(
+                "mfsflow.tool_runtime.ensure_executable_file",
+                side_effect=RuntimeError("read-only"),
+            ), mock.patch("mfsflow.tool_runtime.shutil.which", return_value="/usr/bin/samtools"):
+                resolved = resolve_config_tool_paths({"samtools_exec": str(tool)}, tmpdir)
+
+            self.assertEqual(resolved["samtools_exec"], "samtools")
 
 
 if __name__ == "__main__":

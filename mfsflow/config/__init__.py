@@ -8,6 +8,8 @@ __all__ = [
     "DEFAULT_CONFIG",
     "discover_fastq_pairs",
     "load_samplesheet",
+    "load_run_config",
+    "persist_run_config",
     "require_supported_python",
     "resolve_samplesheet_barcodes",
     "resolve_samplesheet_fastq_groups",
@@ -27,10 +29,9 @@ def __getattr__(name):
     }:
         builder = import_module("mfsflow.config.builder")
         return getattr(builder, name)
-    if name == "write_run_config":
+    if name in {"load_run_config", "persist_run_config", "write_run_config"}:
         serialization = import_module("mfsflow.config.serialization")
-        write_run_config = serialization.write_run_config
-        return write_run_config
+        return getattr(serialization, name)
     if name == "DEFAULT_CONFIG":
         defaults = import_module("mfsflow.config.defaults")
         DEFAULT_CONFIG = defaults.DEFAULT_CONFIG

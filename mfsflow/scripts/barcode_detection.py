@@ -51,6 +51,20 @@ def read_whitelist(bcfile):
         sys.exit(1)
 
 
+def write_unmatched_whitelist_barcodes(bccount_df, whitelist, out_file, limit=100):
+    """Write the most abundant observed barcodes absent from the whitelist."""
+    limit = max(0, int(limit))
+    unmatched = bccount_df.loc[~bccount_df['XC'].isin(whitelist), ['XC', 'n']].copy()
+    unmatched = unmatched.sort_values(by=['n', 'XC'], ascending=[False, True]).head(limit)
+    unmatched = unmatched.rename(columns={'XC': 'barcode', 'n': 'reads'})
+
+    parent = os.path.dirname(out_file)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    unmatched.to_csv(out_file, sep='\t', index=False)
+    return len(unmatched)
+
+
 def load_expected_id_map(expect_file):
     expected = collections.OrderedDict()
     if not expect_file or not os.path.exists(expect_file):
@@ -386,9 +400,32 @@ def main():
     raw_df = pd.read_csv(bccount_file, sep='\t', header=None, names=['XC', 'n'])
     # Aggregate counts just in case of duplicates
     raw_df = raw_df.groupby('XC', as_index=False)['n'].sum()
+
+    # Write this diagnostic before selection so it remains available when a
+    # strict whitelist has no overlap and cell_bc_selection raises an error.
+    unmatched_file = None
+    bc_file = opt.get('barcodes', {}).get('barcode_file')
+    if bc_file:
+        whitelist = read_whitelist(bc_file)
+        unmatched_file = os.path.join(output_base, f"{project}.unmatched_whitelist_barcodes.tsv")
+        unmatched_count = write_unmatched_whitelist_barcodes(
+            raw_df,
+            whitelist,
+            unmatched_file,
+            limit=100,
+        )
+        print(
+            f"Wrote {unmatched_count} unmatched whitelist barcode(s) "
+            f"(top 100 by reads): {unmatched_file}"
+        )
     
     # --- Step 1: Selection ---
-    df_processed = cell_bc_selection(raw_df, opt)
+    try:
+        df_processed = cell_bc_selection(raw_df, opt)
+    except ValueError as exc:
+        if unmatched_file:
+            raise ValueError(f"{exc} Top unmatched barcodes: {unmatched_file}") from exc
+        raise
     
     # Filter to kept only
     kept_df = df_processed[df_processed['keep']].copy()

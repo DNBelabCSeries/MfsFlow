@@ -1,8 +1,27 @@
 import os
 import sys
 import gzip
+import json
 import tempfile
 import unittest
+from types import ModuleType, SimpleNamespace
+from unittest import mock
+
+from mfsflow.cli import _resume_config_path, _resume_existing_run, build_parser, main
+from mfsflow.stages import MAPPING
+
+try:
+    import yaml  # noqa: F401
+    from mfsflow.config.serialization import load_run_config
+except ImportError:
+    yaml = None
+    load_run_config = None
+
+# Some dependency-light test modules install a temporary yaml mock so they can
+# import pure helpers.  That mock is not capable of serializing a resume config.
+if yaml is not None and not isinstance(yaml, ModuleType):
+    yaml = None
+    load_run_config = None
 
 from mfsflow.config.builder import (
     configure_reference,
@@ -14,6 +33,63 @@ from mfsflow.config.builder import (
 
 
 class CliInputTests(unittest.TestCase):
+    def test_later_stage_requires_explicit_resume(self):
+        with self.assertRaises(SystemExit) as error, mock.patch("sys.stderr"):
+            main([
+                "--fastqs", "/reads",
+                "--genomeDir", "/reference",
+                "--sample", "sample",
+                "--stage", MAPPING,
+            ])
+
+        self.assertEqual(error.exception.code, 2)
+
+    def test_resume_config_path_accepts_root_or_processing_directory(self):
+        root = os.path.abspath("/tmp/project")
+        expected = os.path.join(root, "XPRESS_PROCESSING", "config", "run_config.yaml")
+        self.assertEqual(_resume_config_path(root), expected)
+        self.assertEqual(_resume_config_path(os.path.join(root, "XPRESS_PROCESSING")), expected)
+
+    @unittest.skipIf(yaml is None, "PyYAML is not installed")
+    def test_resume_preserves_discovered_barcode_table_and_saved_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processing = os.path.join(tmpdir, "XPRESS_PROCESSING")
+            config_dir = os.path.join(processing, "config")
+            os.makedirs(config_dir)
+            config_path = os.path.join(config_dir, "run_config.yaml")
+            config = {
+                "project": "sample",
+                "out_dir": processing,
+                "num_threads": 12,
+                "which_Stage": "Filtering",
+                "sample": {"sample_type": "discover", "discovered_sample_type": "manual"},
+                "sequence_files": {"file1": {"name": "/saved/R1.fq.gz"}, "file2": {"name": "/saved/R2.fq.gz"}},
+            }
+            with open(config_path, "w", encoding="utf-8") as handle:
+                json.dump(config, handle)
+            barcode_path = os.path.join(config_dir, "expect_id_barcode.tsv")
+            barcode_content = "wellID\tumi_barcodes\tinternal_barcodes\nMANUAL1\tAAAA\tCCCC\n"
+            with open(barcode_path, "w", encoding="utf-8") as handle:
+                handle.write(barcode_content)
+
+            args = SimpleNamespace(
+                outdir=tmpdir,
+                stage=MAPPING,
+                sample=None,
+                threads=None,
+                tmpRoot=None,
+            )
+            with mock.patch("mfsflow.cli._execute_pipeline") as execute:
+                _resume_existing_run(args, build_parser())
+
+            resumed = load_run_config(config_path)
+            self.assertEqual(resumed["which_Stage"], MAPPING)
+            self.assertEqual(resumed["num_threads"], 12)
+            self.assertEqual(resumed["sequence_files"], config["sequence_files"])
+            with open(barcode_path, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), barcode_content)
+            execute.assert_called_once()
+
     def test_discover_fastq_pairs_from_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             r1 = os.path.join(tmpdir, "sample_R1.fastq.gz")

@@ -27,6 +27,17 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
+
+def calculate_read_ratios(exon_reads, intron_reads, intergenic_reads, ambiguity_reads,
+                          unmapped_reads, other_unassigned_reads, all_reads):
+    """Return mapping, genic, and legacy exon/intron ratios."""
+    mapped_reads = exon_reads + intron_reads + intergenic_reads + ambiguity_reads
+    mapping_denom = mapped_reads + unmapped_reads + other_unassigned_reads
+    mapping_ratio = (mapped_reads / mapping_denom) if mapping_denom > 0 else None
+    genic_ratio = ((exon_reads + intron_reads) / all_reads) if all_reads > 0 else None
+    exon_intron_ratio = (exon_reads / intron_reads) if intron_reads > 0 else None
+    return mapping_ratio, genic_ratio, exon_intron_ratio
+
 def load_barcode_mapping(out_dir, _project):
     mapping = {}
     expect_candidates = [
@@ -95,6 +106,22 @@ def calculate_matrix_stats(matrix_dir):
                 stats[bc]['gene_set'].add(row_idx)
                 
     return stats
+
+
+def load_cell_matrix_stats(path):
+    """Load the compact per-cell summary emitted by DGE, if available."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if payload.get("schema_version") != 1:
+            return None
+        if not isinstance(payload.get("umi"), dict) or not isinstance(payload.get("read"), dict):
+            return None
+        return payload
+    except (OSError, ValueError, TypeError):
+        return None
 
 def plot_coverage(cov_umi, cov_int, out_prefix):
     if not HAS_MATPLOTLIB: return
@@ -528,29 +555,37 @@ def main():
     umi_exon_dir = os.path.join(expression_dir(out_dir), f"{project}.exon.umi")
     umi_intron_dir = os.path.join(expression_dir(out_dir), f"{project}.intron.umi")
     
-    # Load UMI stats
-    stats_exon = calculate_matrix_stats(umi_exon_dir)
-    stats_intron = calculate_matrix_stats(umi_intron_dir)
-    
-    stats_inex = collections.defaultdict(lambda: {'umis': 0, 'genes': 0})
-    for bc in set(stats_exon.keys()) | set(stats_intron.keys()):
-        ex_st = stats_exon.get(bc, {'umis': 0, 'genes': 0, 'gene_set': set()})
-        in_st = stats_intron.get(bc, {'umis': 0, 'genes': 0, 'gene_set': set()})
-        stats_inex[bc]['umis'] = ex_st['umis'] + in_st['umis']
-        stats_inex[bc]['genes'] = len(ex_st['gene_set'] | in_st['gene_set'])
+    compact_stats = load_cell_matrix_stats(os.path.join(stats_output_dir, f"{project}.cell_matrix_stats.json"))
 
     # Load Read stats (New Feature)
     read_exon_dir = os.path.join(expression_dir(out_dir), f"{project}.exon.read")
     read_intron_dir = os.path.join(expression_dir(out_dir), f"{project}.intron.read")
-    
-    rstats_exon = calculate_matrix_stats(read_exon_dir)
-    rstats_intron = calculate_matrix_stats(read_intron_dir)
-    
-    rstats_inex = collections.defaultdict(lambda: {'genes': 0})
-    for bc in set(rstats_exon.keys()) | set(rstats_intron.keys()):
-        ex_st = rstats_exon.get(bc, {'genes': 0, 'gene_set': set()})
-        in_st = rstats_intron.get(bc, {'genes': 0, 'gene_set': set()})
-        rstats_inex[bc]['genes'] = len(ex_st['gene_set'] | in_st['gene_set'])
+
+    if compact_stats is not None:
+        print("Using DGE cell matrix QC summary; skipping repeated MEX parsing.")
+        stats_exon = compact_stats["umi"].get("exon", {})
+        stats_intron = compact_stats["umi"].get("intron", {})
+        stats_inex = compact_stats["umi"].get("inex", {})
+        rstats_exon = compact_stats["read"].get("exon", {})
+        rstats_intron = compact_stats["read"].get("intron", {})
+        rstats_inex = compact_stats["read"].get("inex", {})
+    else:
+        stats_exon = calculate_matrix_stats(umi_exon_dir)
+        stats_intron = calculate_matrix_stats(umi_intron_dir)
+        stats_inex = collections.defaultdict(lambda: {'umis': 0, 'genes': 0})
+        for bc in set(stats_exon.keys()) | set(stats_intron.keys()):
+            ex_st = stats_exon.get(bc, {'umis': 0, 'genes': 0, 'gene_set': set()})
+            in_st = stats_intron.get(bc, {'umis': 0, 'genes': 0, 'gene_set': set()})
+            stats_inex[bc]['umis'] = ex_st['umis'] + in_st['umis']
+            stats_inex[bc]['genes'] = len(ex_st['gene_set'] | in_st['gene_set'])
+
+        rstats_exon = calculate_matrix_stats(read_exon_dir)
+        rstats_intron = calculate_matrix_stats(read_intron_dir)
+        rstats_inex = collections.defaultdict(lambda: {'genes': 0})
+        for bc in set(rstats_exon.keys()) | set(rstats_intron.keys()):
+            ex_st = rstats_exon.get(bc, {'genes': 0, 'gene_set': set()})
+            in_st = rstats_intron.get(bc, {'genes': 0, 'gene_set': set()})
+            rstats_inex[bc]['genes'] = len(ex_st['gene_set'] | in_st['gene_set'])
 
     # 3. Load Pre-calculated Read Stats & Coverage
     stats_json_path = os.path.join(stats_output_dir, f"{project}.read_stats.json")
@@ -591,7 +626,7 @@ def main():
             "wellID", "internal_barcodes", "umi_barcodes", 
             "internal_reads", "umi_reads", "all_reads",
             "Ambiguity_reads", "Exon_reads", "Intergenic_reads", "intron_reads", 
-            "Unmapped_reads", "Other_Unassigned_reads", "MappingRatio", "ExonIntronRatio", "UMIfrac",
+            "Unmapped_reads", "Other_Unassigned_reads", "MappingRatio", "GenicRatio", "ExonIntronRatio", "UMIfrac",
             "Exon_umis", "Intron_umis", "Intron_Exon_umis",
             "Exon_genes", "Intron_genes", "Intron_Exon_genes",
             "Exon_read_genes", "Intron_read_genes", "Intron_Exon_read_genes"
@@ -613,10 +648,15 @@ def main():
             internal_r = r_stats.get('Internal_Reads', 0)
             umi_r = r_stats.get('UMI_Reads', 0)
             all_r = internal_r + umi_r
-            mapped_r = exon_r + intron_r + inter_r + ambig
-            mapping_denom = mapped_r + unmapped + other_unassigned
-            mapping_ratio = (mapped_r / mapping_denom) if mapping_denom > 0 else ""
-            exon_intron_ratio = (exon_r / intron_r) if intron_r > 0 else ""
+            mapping_ratio, genic_ratio, exon_intron_ratio = calculate_read_ratios(
+                exon_r,
+                intron_r,
+                inter_r,
+                ambig,
+                unmapped,
+                other_unassigned,
+                all_r,
+            )
             umi_frac = (umi_r / all_r) if all_r > 0 else ""
             
             ex_st = stats_exon.get(well, {'umis': 0, 'genes': 0})
@@ -632,8 +672,9 @@ def main():
                 internal_r, umi_r, all_r,
                 ambig, exon_r, inter_r, intron_r,
                 unmapped, other_unassigned,
-                f"{mapping_ratio:.6f}" if mapping_ratio != "" else "",
-                f"{exon_intron_ratio:.6f}" if exon_intron_ratio != "" else "",
+                f"{mapping_ratio:.6f}" if mapping_ratio is not None else "",
+                f"{genic_ratio:.6f}" if genic_ratio is not None else "",
+                f"{exon_intron_ratio:.6f}" if exon_intron_ratio is not None else "",
                 f"{umi_frac:.6f}" if umi_frac != "" else "",
                 ex_st['umis'], in_st['umis'], inex_st['umis'],
                 ex_st['genes'], in_st['genes'], inex_st['genes'],

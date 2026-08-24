@@ -28,7 +28,7 @@ def _artifact_record(path):
     }
 
 
-def _config_digest(config):
+def _config_digest(config, digest_version=2):
     stable_config = json.loads(json.dumps(config, default=str))
     # The requested resume stage changes between runs and is not an analysis
     # parameter, so it must not invalidate an earlier stage manifest.
@@ -40,6 +40,16 @@ def _config_digest(config):
             if key.startswith("discovered_"):
                 sample_config.pop(key, None)
     stable_config.pop("_analysis_failed", None)
+    stable_config.pop("tool_versions", None)
+    if digest_version >= 2:
+        # Execution placement and parallelism may change during a resume without
+        # changing the analytical inputs or requested outputs.
+        stable_config.pop("num_threads", None)
+        stable_config.pop("toolkit_directory", None)
+        performance = stable_config.get("performance_opts")
+        if isinstance(performance, dict):
+            for key in ("tmp_root", "tool_cache", "min_free_gb", "disk_space_multiplier"):
+                performance.pop(key, None)
     encoded = json.dumps(stable_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -95,18 +105,25 @@ def _quickcheck_bams(runtime, paths, unmapped=False):
             raise RuntimeError(f"BAM integrity check failed: {details}")
         # Unmapped BAMs lack @SQ headers; samtools < 1.10 (no -u support) rejects
         # them. Fall back to pysam which handles no-SQ BAMs natively.
-    if unmapped:
-        _pysam_validate_bams(paths)
+    _pysam_validate_bams(paths)
 
 
 def _pysam_validate_bams(paths):
     """Fallback validation for unmapped (no-SQ) BAMs when samtools is unavailable
     or lacks quickcheck -u support (samtools < 1.10)."""
-    import pysam
+    try:
+        import pysam
+    except ImportError as exc:
+        raise RuntimeError(
+            "BAM integrity validation requires either executable samtools or the pysam package."
+        ) from exc
     failures = []
     for path in paths:
         try:
             with pysam.AlignmentFile(path, "rb", check_sq=False) as bam:
+                check_truncation = getattr(bam, "check_truncation", None)
+                if check_truncation is not None:
+                    check_truncation()
                 next(bam.fetch(until_eof=True), None)
         except Exception as exc:
             failures.append(f"{path}: {exc}")
@@ -133,7 +150,8 @@ def stage_artifacts(runtime, stage):
             os.path.join(tmp_dir, f"{project}*.filtered.tagged.umi.bam"),
             os.path.join(tmp_dir, f"{project}*.filtered.tagged.internal.bam"),
             os.path.join(out_dir, "barcodes", f"{project}.*"),
-            os.path.join(out_dir, "stats", f"{project}.Q30stats.txt"),
+            os.path.join(out_dir, "stats", f"{project}.q30_stats.tsv"),
+            os.path.join(out_dir, f"{project}.BCstats.txt"),
             os.path.join(out_dir, "config", "expect_id_barcode.tsv"),
         ])
     if stage == MAPPING:
@@ -149,6 +167,7 @@ def stage_artifacts(runtime, stage):
             os.path.join(expression_dir(out_dir), f"{project}.h5ad"),
             os.path.join(out_dir, f"{project}.filtered.Aligned.GeneTagged*.bam"),
             os.path.join(stats_dir(out_dir), f"{project}.*saturation_dist.json"),
+            os.path.join(stats_dir(out_dir), f"{project}.cell_matrix_stats.json"),
         ])
     if stage == SUMMARISING:
         return _glob_files([
@@ -213,6 +232,7 @@ def record_stage_success(runtime, stage):
         "stage": stage,
         "status": "success",
         "completed_at": datetime.now().isoformat(timespec="seconds"),
+        "config_digest_version": 2,
         "config_sha256": _config_digest(runtime.config),
         "artifacts": [_artifact_record(path) for path in artifacts],
     }
@@ -247,7 +267,8 @@ def validate_stage_manifest(runtime, stage):
     if payload.get("project") != runtime.project:
         raise RuntimeError(f"Stage {stage} manifest belongs to a different project: {manifest_path}")
     expected_digest = payload.get("config_sha256")
-    if expected_digest and expected_digest != _config_digest(runtime.config):
+    digest_version = int(payload.get("config_digest_version", 1))
+    if expected_digest and expected_digest != _config_digest(runtime.config, digest_version=digest_version):
         raise RuntimeError(f"Stage {stage} manifest was generated from a different configuration.")
 
     artifacts = payload.get("artifacts") or []

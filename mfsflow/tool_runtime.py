@@ -8,8 +8,10 @@ back to a user-writable cache when the installed package is read-only.
 
 import logging
 import os
+import platform
 import shutil
 import stat
+import sys
 import tempfile
 from pathlib import Path
 
@@ -25,6 +27,12 @@ TOOL_SPECS = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def bundled_tools_supported():
+    """Return whether the packaged ELF x86-64 tool set can run here."""
+    machine = platform.machine().strip().lower()
+    return sys.platform.startswith("linux") and machine in {"x86_64", "amd64"}
 
 
 def _is_executable(path):
@@ -173,6 +181,8 @@ def ensure_executable_file(path, tool_name=None, cache_dir=None):
 
 def resolve_bundled_tool(name, toolkit_dir, fallback=None, cache_dir=None):
     """Resolve a bundled tool, preserving the existing PATH fallback."""
+    if not bundled_tools_supported():
+        return fallback or name
     bundled = Path(os.path.abspath(os.path.join(os.path.expanduser(str(toolkit_dir)), "software", name)))
     if not bundled.exists():
         return fallback or name
@@ -184,7 +194,7 @@ def resolve_bundled_tool(name, toolkit_dir, fallback=None, cache_dir=None):
         # system tool when the package resource cannot be repaired or cached.
         if shutil.which(name):
             logger.warning("Falling back to PATH tool %s because bundled tool could not be repaired.", name)
-            return fallback or name
+            return name
         raise
 
 
@@ -196,11 +206,16 @@ def resolve_config_tool_paths(config, toolkit_dir, cache_dir=None):
     commands, matching the historical configuration behavior.
     """
     resolved = {}
+    bundled_root = Path(os.path.abspath(os.path.join(os.path.expanduser(str(toolkit_dir)), "software")))
     for config_key, tool_name in TOOL_SPECS:
         configured = config.get(config_key)
         configured = str(configured) if configured else ""
         is_path = os.path.isabs(configured) or os.path.sep in configured
-        if is_path and os.path.isfile(os.path.expanduser(configured)):
+        configured_path = Path(os.path.abspath(os.path.expanduser(configured))) if is_path else None
+        is_packaged_path = configured_path is not None and configured_path.parent == bundled_root
+        if is_packaged_path and not bundled_tools_supported():
+            resolved[config_key] = tool_name
+        elif is_path and os.path.isfile(os.path.expanduser(configured)):
             try:
                 resolved[config_key] = ensure_executable_file(
                     configured,
@@ -209,7 +224,12 @@ def resolve_config_tool_paths(config, toolkit_dir, cache_dir=None):
                 )
             except RuntimeError:
                 if shutil.which(tool_name):
-                    resolved[config_key] = configured
+                    logger.warning(
+                        "Falling back to PATH tool %s because configured path could not be repaired: %s",
+                        tool_name,
+                        configured,
+                    )
+                    resolved[config_key] = tool_name
                 else:
                     raise
         else:
