@@ -51,7 +51,6 @@ def load_barcode_mapping(out_dir, _project):
     expect_candidates = [
         os.path.join(config_dir(out_dir), "expect_id_barcode.tsv"),
         os.path.join(out_dir, "expect_id_barcode.tsv"),
-        os.path.join(os.path.dirname(out_dir.rstrip('/')), "config", "expect_id_barcode.tsv"),
     ]
     expect_file = next((p for p in expect_candidates if os.path.exists(p)), None)
     

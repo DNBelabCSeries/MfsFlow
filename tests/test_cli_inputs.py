@@ -24,6 +24,7 @@ if yaml is not None and not isinstance(yaml, ModuleType):
     load_run_config = None
 
 from mfsflow.config.builder import (
+    build_base_config,
     configure_reference,
     discover_fastq_pairs,
     load_samplesheet,
@@ -33,6 +34,44 @@ from mfsflow.config.builder import (
 
 
 class CliInputTests(unittest.TestCase):
+    def test_manual_and_custom_runs_disable_default_well_qc(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom_barcode = os.path.join(tmpdir, "custom.tsv")
+            with open(custom_barcode, "w", encoding="utf-8") as handle:
+                handle.write("wellID\tumi_barcodes\tinternal_barcodes\n")
+
+            common = {
+                "sample": "sample",
+                "threads": 1,
+                "stage": "Filtering",
+                "tmpRoot": None,
+                "outdir": tmpdir,
+                "samplesheet": None,
+                "fastqs": tmpdir,
+                "genomeDir": tmpdir,
+                "plate": None,
+            }
+            cases = [
+                {"manual": "20", "expectBarcode": None},
+                {"manual": None, "expectBarcode": custom_barcode},
+            ]
+            with mock.patch("mfsflow.config.builder.load_samplesheet", return_value=[]), \
+                    mock.patch("mfsflow.config.builder.discover_fastq_pairs", return_value=[("R1", "R2")]), \
+                    mock.patch("mfsflow.config.builder.configure_reads"), \
+                    mock.patch("mfsflow.config.builder.configure_reference"):
+                for case in cases:
+                    args = SimpleNamespace(**common, **case)
+                    config, _records = build_base_config(args, "/toolkit")
+                    self.assertEqual(
+                        config["well_qc"],
+                        {
+                            "min_reads": None,
+                            "min_mapping_ratio": None,
+                            "min_genes": None,
+                            "min_umis": None,
+                        },
+                    )
+
     def test_later_stage_requires_explicit_resume(self):
         with self.assertRaises(SystemExit) as error, mock.patch("sys.stderr"):
             main([

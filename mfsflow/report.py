@@ -72,6 +72,7 @@ _JSON_OBJECT_PLACEHOLDERS = {
     "rna_read_distribution_bar_data",
     "rna_read_distribution_box_data",
     "barcode_report_summary_data",
+    "well_qc_status_data",
 }
 
 _CANONICAL_STATS_KEYS = {
@@ -223,6 +224,117 @@ def _to_float(value):
         return float(s.replace(",", ""))
     except Exception:
         return None
+
+
+_DEFAULT_WELL_QC_THRESHOLDS = {
+    "min_reads": 1000.0,
+    "min_mapping_ratio": 0.30,
+    "min_genes": 100.0,
+    "min_umis": 100.0,
+}
+
+
+def _resolve_well_qc_thresholds(config, sample_type=""):
+    """Return validated report-level thresholds for Active wells.
+
+    A configured null/empty value disables that criterion. Invalid values use
+    the default so a malformed optional report setting cannot break report
+    generation.
+
+    Manual and custom runs list their wells explicitly, so those wells are the
+    user's own selection and are not re-filtered unless the user configured
+    ``well_qc`` values. Plate/auto runs use the defaults because they contain
+    empty wells that must be separated from real samples.
+    """
+    mode = str(
+        sample_type
+        or (config.get("sample") or {}).get("sample_type")
+        or ""
+    ).strip().lower()
+    apply_defaults = mode in ("", "auto", "plate", "discover")
+
+    configured = config.get("well_qc", {}) if isinstance(config, dict) else {}
+    if not isinstance(configured, dict):
+        configured = {}
+
+    thresholds = {}
+    for key, default in _DEFAULT_WELL_QC_THRESHOLDS.items():
+        if key in configured:
+            raw = configured[key]
+        else:
+            raw = default if apply_defaults else None
+        if raw is None or str(raw).strip().lower() in {"", "none", "null", "~"}:
+            thresholds[key] = None
+            continue
+
+        value = _to_float(raw)
+        valid = value is not None and value >= 0
+        if key == "min_mapping_ratio":
+            valid = valid and value <= 1
+        if not valid:
+            logger.warning(
+                "Invalid well_qc.%s=%r; using default %s",
+                key,
+                raw,
+                default,
+            )
+            value = default
+        thresholds[key] = value
+
+    # Intron_Exon_genes and Intron_Exon_umis are derived from the same UMI
+    # matrix. If the gene threshold is higher, it is the stricter criterion
+    # and the UMI threshold becomes redundant; preserve the user's settings.
+    if (
+        thresholds["min_genes"] is not None
+        and thresholds["min_umis"] is not None
+        and thresholds["min_genes"] > thresholds["min_umis"]
+    ):
+        logger.warning(
+            "well_qc.min_genes=%s exceeds min_umis=%s; the UMI criterion is redundant",
+            thresholds["min_genes"],
+            thresholds["min_umis"],
+        )
+    return thresholds
+
+
+def _evaluate_well_qc(reads, mapping, genes, umis, thresholds):
+    """Evaluate one well and return ``(passed, failed_criteria)``."""
+    values = {
+        "reads": (reads, "min_reads"),
+        "mapping": (mapping, "min_mapping_ratio"),
+        "genes": (genes, "min_genes"),
+        "umis": (umis, "min_umis"),
+    }
+    failed = []
+    for label, (value, key) in values.items():
+        threshold = thresholds.get(key)
+        if threshold is None:
+            continue
+        if value is None or value < threshold:
+            failed.append(label)
+    return not failed, failed
+
+
+def _format_well_qc_threshold(key, value):
+    if value is None:
+        return "disabled"
+    if key == "min_mapping_ratio":
+        return f"{value * 100:.1f}%"
+    if float(value).is_integer():
+        return f"{int(value):,}"
+    return f"{value:g}"
+
+
+def _well_qc_help_text(thresholds):
+    """Build the explanation shown by the Active-wells help button."""
+    return (
+        "A well is counted as Active only when it passes every enabled criterion.\n"
+        f"Reads: >= {_format_well_qc_threshold('min_reads', thresholds.get('min_reads'))}\n"
+        f"Mapping ratio: >= {_format_well_qc_threshold('min_mapping_ratio', thresholds.get('min_mapping_ratio'))}\n"
+        f"Genes: >= {_format_well_qc_threshold('min_genes', thresholds.get('min_genes'))}\n"
+        f"UMIs: >= {_format_well_qc_threshold('min_umis', thresholds.get('min_umis'))}\n"
+        "PE data are counted as read pairs. A missing metric does not pass an enabled criterion."
+    )
 
 
 def _fmt_int(value):
@@ -461,49 +573,65 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
     sample_type = str(combined_context.get("sample_type") or configured_sample_type).strip().lower()
     barcode_source = str(config.get("barcode_source") or "").strip()
     expected_rows = _load_expected_barcode_rows(sample_outdir)
-    expected_by_well = {row["wellID"]: row for row in expected_rows if row.get("wellID")}
+    # Normalise case so "p1a1" from expect_id_barcode.tsv still matches the
+    # "P1A1" well IDs used in stats.tsv; a case mismatch would otherwise mark
+    # every well as unexpected and silently zero the Active-well count.
+    expected_by_well = {
+        str(row["wellID"]).strip().upper(): row
+        for row in expected_rows
+        if row.get("wellID")
+    }
+    # Use the configured input mode for QC defaults. A discover run may select
+    # the manual report template after barcode discovery, but it still needs
+    # the plate/discover defaults for Active-well filtering.
+    well_qc_mode = configured_sample_type or sample_type
+    well_qc_thresholds = _resolve_well_qc_thresholds(config, well_qc_mode)
+    active_help = _well_qc_help_text(well_qc_thresholds)
 
     total_reads = []
     umi_reads = []
-    internal_reads = []
-    genes = []
-    read_genes = []
-    umis = []
-    mapping_ratios = []
+    active_reads = []
+    active_genes = []
+    active_read_genes = []
+    active_umis = []
+    active_mapping_ratios = []
+    # Fallback pools: metrics for every well regardless of QC outcome. Used only
+    # when no well passes, so the report shows data instead of blank medians.
+    all_genes = []
+    all_read_genes = []
+    all_umis = []
+    all_mapping_ratios = []
     active = 0
     plate_ids = set()
     manual_rows = []
     plate_summary = {}
+    well_qc_status = {}
 
     for raw in records:
         row = _normalize_stats_record(raw)
         well = str(row.get("wellID") or "").strip()
         if not well:
             continue
+        well_key = well.upper()
+        is_expected = not expected_rows or well_key in expected_by_well
 
         internal = _to_float(row.get("internal_reads")) or 0.0
         umi = _to_float(row.get("umi_reads")) or 0.0
         all_reads = _to_float(row.get("all_reads"))
         if all_reads is None:
             all_reads = internal + umi
-        if all_reads > 0:
-            active += 1
         total_reads.append(all_reads)
-        internal_reads.append(internal)
         umi_reads.append(umi)
 
         gene_val = _to_float(row.get("Intron_Exon_genes"))
         if gene_val is None:
             gene_val = _to_float(row.get("Exon_genes"))
-        genes.append(gene_val)
         read_gene_val = _to_float(row.get("Intron_Exon_read_genes"))
         if read_gene_val is None:
             read_gene_val = _to_float(row.get("Exon_read_genes"))
-        read_genes.append(read_gene_val)
         umi_val = _to_float(row.get("Intron_Exon_umis"))
         if umi_val is None:
             umi_val = _to_float(row.get("Exon_umis"))
-        umis.append(umi_val)
 
         mapping = _to_float(row.get("MappingRatio"))
         if mapping is None:
@@ -512,21 +640,64 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
             intergenic_r = _to_float(row.get("Intergenic_reads")) or 0.0
             ambiguity_r = _to_float(row.get("Ambiguity_reads")) or 0.0
             unmapped_r = _to_float(row.get("Unmapped_reads")) or 0.0
-            denom = exon_r + intron_r + intergenic_r + ambiguity_r + unmapped_r
-            mapping = ((exon_r + intron_r + intergenic_r + ambiguity_r) / denom) if denom > 0 else None
-        mapping_ratios.append(mapping)
+            other_unassigned_r = _to_float(row.get("Other_Unassigned_reads")) or 0.0
+            denom = exon_r + intron_r + intergenic_r + ambiguity_r + other_unassigned_r + unmapped_r
+            mapping = (
+                (exon_r + intron_r + intergenic_r + ambiguity_r + other_unassigned_r) / denom
+                if denom > 0
+                else None
+            )
+        is_active, active_failures = _evaluate_well_qc(
+            all_reads,
+            mapping,
+            gene_val,
+            umi_val,
+            well_qc_thresholds,
+        )
+        reported_active = is_active and is_expected
+        if reported_active:
+            active += 1
+            active_reads.append(all_reads)
+            if gene_val is not None:
+                active_genes.append(gene_val)
+            if read_gene_val is not None:
+                active_read_genes.append(read_gene_val)
+            if umi_val is not None:
+                active_umis.append(umi_val)
+            if mapping is not None:
+                active_mapping_ratios.append(mapping)
+        # The fallback is still restricted to expected wells. Unexpected rows
+        # may be stale or diagnostic artifacts and must not affect report
+        # medians even when no expected well passes QC.
+        if is_expected:
+            if gene_val is not None:
+                all_genes.append(gene_val)
+            if read_gene_val is not None:
+                all_read_genes.append(read_gene_val)
+            if umi_val is not None:
+                all_umis.append(umi_val)
+            if mapping is not None:
+                all_mapping_ratios.append(mapping)
+        if not is_expected and expected_rows:
+            active_failures = list(active_failures) + ["unexpected"]
+        well_qc_status[well] = {
+            "active": reported_active,
+            "expected": is_expected,
+            "failed": active_failures,
+        }
 
         plate = _well_plate_id(well)
         if plate:
             plate_ids.add(plate)
             bucket = plate_summary.setdefault(plate, {"plate": plate, "expected_wells": 0, "active_wells": 0, "reads": [], "genes": [], "read_genes": [], "umis": []})
-            bucket["active_wells"] += 1 if all_reads > 0 else 0
-            bucket["reads"].append(all_reads)
-            bucket["genes"].append(gene_val)
-            bucket["read_genes"].append(read_gene_val)
-            bucket["umis"].append(umi_val)
+            bucket["active_wells"] += 1 if reported_active else 0
+            if reported_active:
+                bucket["reads"].append(all_reads)
+                bucket["genes"].append(gene_val)
+                bucket["read_genes"].append(read_gene_val)
+                bucket["umis"].append(umi_val)
 
-        expected = expected_by_well.get(well, {})
+        expected = expected_by_well.get(well_key, {})
         # Calculate the genic fraction used by the report. ExonIntronRatio is
         # retained separately as the legacy exon/intron quotient.
         umi_fraction = (umi / all_reads) if all_reads and all_reads > 0 else None
@@ -558,6 +729,9 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
             "exon_intron_ratio": exon_intron_ratio,
             "GenicRatio": genic_ratio,
             "genic_ratio": genic_ratio,
+            "active": reported_active,
+            "active_status": "Active" if reported_active else "Not active",
+            "active_failures": ", ".join(active_failures),
         })
 
     if expected_rows:
@@ -582,23 +756,87 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
         "expected_wells": expected_count,
         "active_wells": active,
         "active_fraction": (active / expected_count) if expected_count else None,
+        "active_well_thresholds": well_qc_thresholds,
         "plate_count": len(plate_ids),
         "total_reads": total_read_sum,
-        "median_reads": _median(total_reads),
-        "median_genes": _median(genes),
-        "median_read_genes": _median(read_genes),
-        "median_umis": _median(umis),
-        "median_mapping_ratio": _median(mapping_ratios),
+        "median_reads": _median(active_reads),
+        "median_genes": _median(active_genes),
+        "median_read_genes": _median(active_read_genes),
+        "median_umis": _median(active_umis),
+        "median_mapping_ratio": _median(active_mapping_ratios),
         "umi_fraction": (umi_read_sum / total_read_sum) if total_read_sum > 0 else None,
     }
 
+    # No well passed QC: median cards based on Active wells would all be blank,
+    # which reads like "the run produced nothing" even though data exist. Fall
+    # back to every well and flag it so the report can say so explicitly.
+    qc_all_failed = bool(expected_count) and active == 0 and bool(records)
+    summary["qc_all_failed"] = qc_all_failed
+    # Mirror the flag into well_qc_status so the JS summary tables can use
+    # all-wells medians too instead of rendering blanks for the Active subset.
+    well_qc_status["__all_failed__"] = qc_all_failed
+    if qc_all_failed:
+        summary["median_reads"] = _median(total_reads)
+        summary["median_genes"] = _median(all_genes)
+        summary["median_read_genes"] = _median(all_read_genes)
+        summary["median_umis"] = _median(all_umis)
+        summary["median_mapping_ratio"] = _median(all_mapping_ratios)
+        logger.warning(
+            "No well passed the Active-well QC thresholds (%s); median metrics "
+            "fall back to all %d well(s).",
+            well_qc_thresholds,
+            expected_count,
+        )
+
+    # When nothing passed QC the medians come from every well, so the card help
+    # must say that instead of claiming they are Active-well medians.
+    median_scope = (
+        "all wells (no well passed QC)" if qc_all_failed else "Active wells"
+    )
+    qc_warning = None
+    if qc_all_failed:
+        qc_warning = (
+            f"No well passed the Active-well QC thresholds, so median metrics "
+            f"below are computed across all {expected_count} well(s) instead of "
+            f"Active wells. Review the well_qc thresholds in the configuration."
+        )
+
     cards = [
-        {"label": "Barcode mode", "value": summary["sample_type_label"]},
-        {"label": "Expected wells", "value": _fmt_int(summary["expected_wells"])},
-        {"label": "Active wells", "value": _fmt_int(summary["active_wells"])},
-        {"label": "Median reads", "value": _fmt_int(summary["median_reads"])},
-        {"label": "Median genes (UMIs)", "value": _fmt_int(summary["median_genes"])},
-        {"label": "Median mapping", "value": _fmt_pct(summary["median_mapping_ratio"])},
+        {
+            "label": "Barcode mode",
+            "value": summary["sample_type_label"],
+        },
+        {
+            "label": "Expected wells",
+            "value": _fmt_int(summary["expected_wells"]),
+            "help_title": "Expected wells",
+            "help": "Number of wells listed in expect_id_barcode.tsv. Wells with zero reads remain in this denominator.",
+        },
+        {
+            "label": "Active wells",
+            "value": _fmt_int(summary["active_wells"]),
+            "help_title": "Active wells",
+            "help": active_help,
+            "warning": qc_warning,
+        },
+        {
+            "label": "Median reads",
+            "value": _fmt_int(summary["median_reads"]),
+            "help_title": "Median reads",
+            "help": f"Median all_reads across {median_scope}. In PE mode, one read pair is one unit.",
+        },
+        {
+            "label": "Median genes (UMIs)",
+            "value": _fmt_int(summary["median_genes"]),
+            "help_title": "Median genes (UMIs)",
+            "help": f"Median detected genes across {median_scope}, using the exon plus intron UMI matrix when available.",
+        },
+        {
+            "label": "Median mapping",
+            "value": _fmt_pct(summary["median_mapping_ratio"]),
+            "help_title": "Median mapping",
+            "help": f"Median MappingRatio across {median_scope}. MappingRatio is the fraction of counted reads that are not unmapped.",
+        },
     ]
 
     plate_rows = []
@@ -621,6 +859,7 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
     combined_context["barcode_mode_cards_data"] = json.dumps(cards)
     combined_context["manual_barcode_table_data"] = json.dumps(manual_rows)
     combined_context["auto_plate_summary_data"] = json.dumps(plate_rows)
+    combined_context["well_qc_status_data"] = json.dumps(well_qc_status)
 
 
 def _read_discovered_sample_type(sample_outdir, project=""):
@@ -1176,7 +1415,10 @@ def _process_sequencing_quality_data(sample_outdir, combined_context):
             r1_total_bases = (q30_rows.get("R1") or {}).get("total_bases")
             total_reads = int(round(r1_total_bases / r1_len)) if r1_len and r1_total_bases else None
             valid_bc_reads = _sum_bcstats_reads(sample_outdir, project)
-            unused_bc_reads = (total_reads - valid_bc_reads) if total_reads is not None and valid_bc_reads is not None else None
+            # read_stats.json is missing, so Unused cannot be computed with a
+            # matching metric semantics: raw-input minus BCstats would also count reads that
+            # fqfilter dropped for quality, inflating the Unused number.
+            unused_bc_reads = None
             valid_bc_rate = (valid_bc_reads / total_reads) if total_reads and valid_bc_reads is not None else None
 
         metric_map = [

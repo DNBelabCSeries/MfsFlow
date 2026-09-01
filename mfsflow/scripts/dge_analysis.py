@@ -446,9 +446,17 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
         print(f"Sorting input BAM to temporary file using {threads} threads...")
         temp_sorted_bam = bam_file + ".temp_sorted.bam"
         sort_cmd = [samtools_exec, "sort", "-@", str(threads), "-o", temp_sorted_bam, bam_file]
-        subprocess.check_call(sort_cmd)
-        print("Indexing temporary sorted BAM...")
-        pysam.index(temp_sorted_bam)
+        try:
+            subprocess.check_call(sort_cmd)
+            print("Indexing temporary sorted BAM...")
+            pysam.index(temp_sorted_bam)
+        except Exception:
+            # The outer finally only runs once the second try block is entered,
+            # so clean up the partial temp BAM here before propagating.
+            for leftover in (temp_sorted_bam, temp_sorted_bam + ".bai"):
+                if os.path.exists(leftover):
+                    os.remove(leftover)
+            raise
         bam_file = temp_sorted_bam
 
     try:

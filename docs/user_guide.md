@@ -139,7 +139,7 @@ mfsflow \
 | `--genomeDir` | Yes | Reference directory containing `star/` and `genes/genes.gtf` or `genes/genes.gtf.gz` |
 | `--sample` | Yes | Sample name (used for output naming) |
 | `--outdir` | No | Output directory (default: `./<sample_name>`) |
-| `--threads` | No | Number of threads (default: 20) |
+| `--threads` | No | Number of threads (default: 30) |
 | `--tmpRoot` | No | Temporary root for intermediate files (e.g., `/dev/shm`) |
 | `--stage` | No | Start from specific stage (Filtering/Mapping/Counting/Summarising) |
 | `--resume` | No | Reuse the saved run configuration; requires `--outdir` and an explicit `--stage` |

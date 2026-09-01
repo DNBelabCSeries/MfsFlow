@@ -167,14 +167,16 @@ def main():
             idx = args.index('--limit')
             read_limit = int(args[idx + 1])
             args = args[:idx] + args[idx + 2:]
-        except Exception:
+        except (ValueError, IndexError) as e:
+            sys.stderr.write(f"Warning: invalid --limit value ignored ({e}).\n")
             read_limit = 0
     if '--pigz-threads' in args:
         try:
             idx = args.index('--pigz-threads')
             pigz_threads = max(1, int(args[idx + 1]))
             args = args[:idx] + args[idx + 2:]
-        except Exception:
+        except (ValueError, IndexError) as e:
+            sys.stderr.write(f"Warning: invalid --pigz-threads value ignored ({e}).\n")
             pigz_threads = 1
     if '--direct-fastq' in args:
         idx = args.index('--direct-fastq')
@@ -185,14 +187,16 @@ def main():
             idx = args.index('--group-start')
             group_start = int(args[idx + 1])
             args = args[:idx] + args[idx + 2:]
-        except Exception:
+        except (ValueError, IndexError) as e:
+            sys.stderr.write(f"Warning: invalid --group-start value ignored ({e}).\n")
             group_start = None
     if '--group-end' in args:
         try:
             idx = args.index('--group-end')
             group_end = int(args[idx + 1])
             args = args[:idx] + args[idx + 2:]
-        except Exception:
+        except (ValueError, IndexError) as e:
+            sys.stderr.write(f"Warning: invalid --group-end value ignored ({e}).\n")
             group_end = None
 
     yaml_file = args[0]

@@ -1,5 +1,6 @@
 import os
 import gzip
+import subprocess
 import tempfile
 import unittest
 import json
@@ -81,6 +82,31 @@ class MappingAndCountingLogicTests(unittest.TestCase):
                 run_star_pipe(["python3", "stream_corrector.py"], ["STAR", "--readFilesIn", "/dev/stdin"])
 
         self.assertNotIn("shell", popen.call_args_list[1].kwargs)
+
+    def test_mapping_timeout_kills_star_and_stream_corrector(self):
+        producer = mock.Mock(returncode=None)
+        producer.stdout = mock.Mock()
+        producer.poll.return_value = None
+        producer.wait.side_effect = [None]
+        consumer = mock.Mock(returncode=None)
+        consumer.poll.return_value = None
+        consumer.wait.side_effect = [
+            subprocess.TimeoutExpired(["STAR"], 0.1),
+            None,
+        ]
+        with mock.patch(
+            "mfsflow.scripts.mapping_analysis.subprocess.Popen",
+            side_effect=[producer, consumer],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                run_star_pipe(
+                    ["python3", "stream_corrector.py"],
+                    ["STAR", "--readFilesIn", "/dev/stdin"],
+                    timeout=0.1,
+                )
+
+        producer.kill.assert_called_once()
+        consumer.kill.assert_called_once()
 
     def test_mapping_resume_uses_filtering_manifest_after_tmp_root_change(self):
         with tempfile.TemporaryDirectory() as tmpdir:

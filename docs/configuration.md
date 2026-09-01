@@ -273,6 +273,47 @@ barcodes:
 
 **Recommendation**: Use `1` for most datasets. Use `0` only if you have perfect barcode sequences.
 
+## Well QC Options
+
+These options control the report's `Active wells` metric only. They do not
+remove wells from the expression matrix or alter downstream counting. A well
+must pass every enabled criterion. In PE mode, `min_reads` is measured in read
+pairs. Set a value to `null` to disable that criterion.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `well_qc.min_reads` | int | 1000 | Minimum counted reads/read pairs per well |
+| `well_qc.min_mapping_ratio` | float | 0.30 | Minimum MappingRatio, from 0 to 1 |
+| `well_qc.min_genes` | int | 100 | Minimum exon plus intron detected genes |
+| `well_qc.min_umis` | int | 100 | Minimum exon plus intron detected UMIs |
+
+### Mode-specific defaults
+
+The default thresholds above apply to **plate/auto** runs (including
+`discover`), where the wells are a fixed plate layout that normally contains
+empty wells. For **manual** and **custom** runs the wells are the user's own
+explicit selection, so the thresholds are **disabled by default** — every
+listed well counts as Active unless you configure `well_qc` explicitly. Any
+explicitly configured `well_qc` value always overrides the mode-specific
+default.
+
+### Example
+```yaml
+well_qc:
+  min_reads: 1000
+  min_mapping_ratio: 0.30
+  min_genes: 100
+  min_umis: 100
+```
+
+`Expected wells` is the number of rows in `expect_id_barcode.tsv`, including
+wells with no usable reads. `Active wells` is the subset that passes all
+enabled thresholds. A missing metric fails its enabled criterion.
+
+If **no** well passes the enabled thresholds, the report falls back to computing
+the median cards across *all* wells (instead of Active wells) and shows a
+warning banner, so a failed QC never looks like an empty run.
+
 ### Automatic Barcode Detection
 If `barcode_num` is null and `automatic` is false, the pipeline will:
 1. Count barcode frequencies
@@ -324,6 +365,7 @@ counting_opts:
 | `performance_opts.tool_cache` | string | null | Writable cache for bundled tools when the installed package is read-only |
 | `performance_opts.min_free_gb` | number | 5 | Minimum free disk space required before execution |
 | `performance_opts.disk_space_multiplier` | number | 4.0 | Estimated workspace requirement relative to FASTQ size |
+| `performance_opts.mapping_timeout_sec` | number | null | Optional timeout for each corrector-to-STAR mapping stream; null disables it |
 | `num_threads` | int | 30 | Number of threads to use |
 
 ### Command-Line Equivalent
@@ -336,6 +378,7 @@ performance_opts:
   stream_bc_correction: true
   tmp_root: null          # or "/dev/shm"
   tool_cache: null        # or "/path/to/writable/mfsflow-tool-cache"
+  mapping_timeout_sec: null # Optional timeout per mapping stream
 num_threads: 30
 ```
 
@@ -470,6 +513,11 @@ barcodes:
   automatic: no
   BarcodeBinning: 1
   nReadsperCell: 1
+well_qc:
+  min_reads: 1000
+  min_mapping_ratio: 0.30
+  min_genes: 100
+  min_umis: 100
 counting_opts:
   introns: yes
   strand: 1

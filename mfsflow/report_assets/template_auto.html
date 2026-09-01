@@ -256,6 +256,113 @@ ${plotly_loader_tag}
         text-transform: uppercase;
         letter-spacing: 0.5px;
     }
+    .card-label-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 18px;
+    }
+    .card-warning {
+        border-color: #d97706 !important;
+        box-shadow: inset 0 0 0 1px rgba(217, 119, 6, 0.35);
+    }
+    .qc-warning-banner {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 10px 12px;
+        border: 1px solid #d97706;
+        border-left-width: 4px;
+        border-radius: 8px;
+        background: rgba(217, 119, 6, 0.10);
+        color: var(--text);
+        font-size: 13px;
+        line-height: 1.45;
+    }
+    .qc-warning-banner .qc-warning-icon {
+        font-weight: 700;
+        color: #d97706;
+    }
+    .help-button {
+        width: 17px;
+        height: 17px;
+        padding: 0;
+        border: 1px solid var(--muted);
+        border-radius: 50%;
+        background: transparent;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 15px;
+        cursor: pointer;
+        text-transform: none;
+    }
+    .help-button:hover,
+    .help-button:focus-visible {
+        border-color: var(--primary);
+        color: var(--primary);
+        outline: none;
+    }
+    .help-modal[hidden] { display: none; }
+    .help-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+    }
+    .help-modal-backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.48);
+    }
+    .help-dialog {
+        position: relative;
+        width: min(560px, 100%);
+        max-height: min(80vh, 520px);
+        overflow: auto;
+        padding: 22px 24px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        color: var(--text);
+        box-shadow: 0 20px 60px rgba(15, 23, 42, 0.28);
+    }
+    .help-dialog-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 12px;
+    }
+    .help-dialog-title {
+        margin: 0;
+        color: var(--text);
+        font-size: 17px;
+    }
+    .help-dialog-close {
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 4px 9px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+    }
+    .help-dialog-close:hover,
+    .help-dialog-close:focus-visible {
+        border-color: var(--primary);
+        color: var(--primary);
+        outline: none;
+    }
+    .help-dialog-body {
+        color: var(--text-secondary);
+        font-size: 13px;
+        line-height: 1.65;
+        white-space: pre-line;
+    }
     
     /* Panels */
     .panel {
@@ -933,11 +1040,28 @@ ${plotly_loader_tag}
     <div class="loading-text">Loading report data...</div>
 </div>
 
+<div class="help-modal" id="help-modal" hidden>
+    <div class="help-modal-backdrop" data-help-close></div>
+    <div class="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-dialog-title">
+        <div class="help-dialog-header">
+            <h3 class="help-dialog-title" id="help-dialog-title"></h3>
+            <button type="button" class="help-dialog-close" data-help-close aria-label="Close explanation">Close</button>
+        </div>
+        <div class="help-dialog-body" id="help-dialog-body"></div>
+    </div>
+</div>
+
 <script>
 (function() {
     const stats = parseJson('${rna_stats_table_data}', []);
     const cards = parseJson('${barcode_mode_cards_data}', []);
     const plateSummary = parseJson('${auto_plate_summary_data}', []);
+    const wellQc = parseJson('${well_qc_status_data}', {});
+    function isActiveRow(row) {
+        const qc = wellQc[String(row.wellID || '')];
+        return qc ? qc.active === true : true;
+    }
+    const activeStats = stats.filter(isActiveRow);
     const readDist = parseJson('${rna_read_distribution_bar_data}', {});
     const satX = parseJson('${rna_saturation_fraction}', []);
     const satLib = parseJson('${rna_saturation_lib_pct}', []);
@@ -1010,12 +1134,8 @@ ${plotly_loader_tag}
         }, extra || {});
     }
     function rowClass(row, ratio) {
-        const mapping = num(row.MappingRatio);
-        const genes = metricValue(row, 'genes');
-        const reads = metricValue(row, 'allreads');
-        const genicRatio = ratio === undefined ? metricValue(row, 'genicratio') : ratio;
-        if ((mapping !== null && mapping < 0.35) || (genicRatio !== null && genicRatio < 0.35)) return 'warn-row';
-        if ((mapping !== null && mapping < 0.55) || (genicRatio !== null && genicRatio < 0.5) || (genes !== null && genes < 500) || (reads !== null && reads < 1000)) return 'review-row';
+        const qc = wellQc[String(row.wellID || '')];
+        if (row.active === false || (qc && qc.active === false)) return 'review-row';
         return '';
     }
     function metricValue(row, metric) {
@@ -1044,18 +1164,65 @@ ${plotly_loader_tag}
         if (used > 0) return used;
         return metricValue(row, 'allreads');
     }
+    function closeHelp() {
+        const modal = el('help-modal');
+        if (!modal) return;
+        modal.hidden = true;
+    }
+    function openHelp(title, body) {
+        const modal = el('help-modal');
+        const titleNode = el('help-dialog-title');
+        const bodyNode = el('help-dialog-body');
+        if (!modal || !titleNode || !bodyNode) return;
+        titleNode.textContent = title || 'Explanation';
+        bodyNode.textContent = body || '';
+        modal.hidden = false;
+        const closeButton = modal.querySelector('.help-dialog-close');
+        if (closeButton) closeButton.focus();
+    }
+    document.querySelectorAll('[data-help-close]').forEach(function(node) {
+        node.addEventListener('click', closeHelp);
+    });
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') closeHelp();
+    });
     function renderCards() {
         const target = el('summary-cards');
         target.innerHTML = '';
+        let warning = null;
         cards.forEach(function(card) {
             const div = document.createElement('div');
             div.className = 'card';
-            div.innerHTML = '<div class="card-value"></div><div class="card-label"></div>';
+            div.innerHTML = '<div class="card-value"></div><div class="card-label-row"><span class="card-label"></span></div>';
             div.children[0].textContent = card.value || '';
             const isBarcodeMode = String(card.label || '').toLowerCase() === 'barcode mode';
-            div.children[1].textContent = isBarcodeMode ? '' : (card.label || '');
+            const labelNode = div.querySelector('.card-label');
+            labelNode.textContent = isBarcodeMode ? '' : (card.label || '');
+            if (!isBarcodeMode && card.help) {
+                const helpButton = document.createElement('button');
+                helpButton.type = 'button';
+                helpButton.className = 'help-button';
+                helpButton.textContent = '?';
+                helpButton.setAttribute('aria-label', 'Explain ' + (card.label || 'metric'));
+                helpButton.addEventListener('click', function(event) {
+                    event.stopPropagation();
+                    openHelp(card.help_title || card.label, card.help);
+                });
+                labelNode.parentElement.appendChild(helpButton);
+            }
+            if (card.warning) {
+                div.classList.add('card-warning');
+                warning = card.warning;
+            }
             target.appendChild(div);
         });
+        if (warning) {
+            const banner = document.createElement('div');
+            banner.className = 'qc-warning-banner';
+            banner.innerHTML = '<span class="qc-warning-icon">!</span><span></span>';
+            banner.lastChild.textContent = warning;
+            target.prepend(banner);
+        }
     }
 
     function renderPlateOverview() {
@@ -1071,11 +1238,12 @@ ${plotly_loader_tag}
             rowsByPlate[w.plate].push(w.raw);
         });
         function medianOfPlate(plate, metric) {
-            const vals = (rowsByPlate[plate] || []).map(function(row) { return metricValue(row, metric); }).filter(function(v) { return v !== null; });
+            const vals = (rowsByPlate[plate] || []).filter(isActiveRow).map(function(row) { return metricValue(row, metric); }).filter(function(v) { return v !== null; });
             return median(vals);
         }
         function medianGenicRatio(plate) {
             const vals = (rowsByPlate[plate] || [])
+                .filter(isActiveRow)
                 .map(function(row) { return metricValue(row, 'genicratio'); })
                 .filter(function(v) { return v !== null; });
             return median(vals);
@@ -1247,15 +1415,22 @@ ${plotly_loader_tag}
         return vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
     }
     function summarizeMetric(keys) {
-        const vals = stats.map(function(row) {
-            for (let i = 0; i < keys.length; i++) {
-                const v = num(row[keys[i]]);
-                if (v !== null) return v;
-            }
-            return null;
-        }).filter(function(v) { return v !== null; });
-        const total = vals.reduce(function(a, b) { return a + b; }, 0);
-        return { total: total, median: median(vals) };
+        function values(rows) {
+            return rows.map(function(row) {
+                for (let i = 0; i < keys.length; i++) {
+                    const v = num(row[keys[i]]);
+                    if (v !== null) return v;
+                }
+                return null;
+            }).filter(function(v) { return v !== null; });
+        }
+        const allVals = values(stats);
+        const activeVals = values(activeStats);
+        const total = allVals.reduce(function(a, b) { return a + b; }, 0);
+        // When no well passed QC the Python side reports medians across all
+        // wells; mirror that here so the summary tables do not go blank.
+        const medianVals = wellQc.__all_failed__ ? allVals : activeVals;
+        return { total: total, median: median(medianVals) };
     }
     function renderUmiReadComparison() {
         const umiSummary = {
@@ -1291,10 +1466,10 @@ ${plotly_loader_tag}
         const readPlot = el('read-comparison');
         if (!window.Plotly || !umiPlot || !readPlot) return;
         const dist = {
-            umi_genes: stats.map(function(row) { return metricValue(row, 'genes'); }).filter(function(v) { return v !== null; }),
-            umi_umis: stats.map(function(row) { return metricValue(row, 'umis'); }).filter(function(v) { return v !== null; }),
-            read_genes: stats.map(function(row) { return num(row.Intron_Exon_read_genes) ?? num(row.Exon_read_genes); }).filter(function(v) { return v !== null; }),
-            all_reads: stats.map(function(row) { return metricValue(row, 'allreads'); }).filter(function(v) { return v !== null; })
+            umi_genes: activeStats.map(function(row) { return metricValue(row, 'genes'); }).filter(function(v) { return v !== null; }),
+            umi_umis: activeStats.map(function(row) { return metricValue(row, 'umis'); }).filter(function(v) { return v !== null; }),
+            read_genes: activeStats.map(function(row) { return num(row.Intron_Exon_read_genes) ?? num(row.Exon_read_genes); }).filter(function(v) { return v !== null; }),
+            all_reads: activeStats.map(function(row) { return metricValue(row, 'allreads'); }).filter(function(v) { return v !== null; })
         };
         Plotly.newPlot(umiPlot, [
             { type: 'box', name: 'UMI genes', y: dist.umi_genes, marker: { color: qcColors.genes, size: 2.5, opacity: .35 }, line: { color: qcColors.genes }, boxpoints: 'all', jitter: .32, pointpos: 0 },
@@ -1439,9 +1614,10 @@ ${plotly_loader_tag}
         const count = el('stats-count');
         const pagination = el('pagination');
 
-        const cols = ['wellID', 'umi_reads', 'internal_reads', 'MappingRatio', 'GenicRatio', 'UMIfrac', 'Intron_Exon_genes', 'Intron_Exon_umis'];
+        const cols = ['wellID', 'well_status', 'umi_reads', 'internal_reads', 'MappingRatio', 'GenicRatio', 'UMIfrac', 'Intron_Exon_genes', 'Intron_Exon_umis'];
         const colNames = {
             'wellID': 'Well ID',
+            'well_status': 'Well status',
             'umi_reads': 'UMI Reads',
             'internal_reads': 'Internal Reads',
             'MappingRatio': 'Mapping Ratio',
@@ -1454,7 +1630,16 @@ ${plotly_loader_tag}
         const statsWithDerived = stats.map(function(row) {
             const allReads = usedReads(row);
             const ratio = metricValue(row, 'genicratio');
-            return Object.assign({}, row, { GenicRatio: ratio });
+            const wellId = String(row.wellID || '');
+            const qc = wellQc[wellId];
+            let status = '';
+            if (qc) {
+                status = qc.active ? 'Active' : 'Not active';
+                if (!qc.active && Array.isArray(qc.failed) && qc.failed.length) {
+                    status += ' (' + qc.failed.join(', ') + ')';
+                }
+            }
+            return Object.assign({}, row, { GenicRatio: ratio, well_status: status });
         });
         let currentRows = [...statsWithDerived];
         let sortCol = null;
@@ -1481,7 +1666,7 @@ ${plotly_loader_tag}
 
             let bodyHtml = '<tbody>' + pageRows.map(function(row) {
                 return '<tr>' + cols.map(function(c) {
-                    const numeric = c !== 'wellID';
+                    const numeric = c !== 'wellID' && c !== 'well_status';
                     const v = (c === 'MappingRatio' || c === 'UMIfrac' || c === 'GenicRatio') ? fmtPct(row[c]) : (numeric ? fmtInt(row[c]) : String(row[c] || ''));
                     return '<td class="' + (numeric ? 'numeric' : '') + '">' + v + '</td>';
                 }).join('') + '</tr>';

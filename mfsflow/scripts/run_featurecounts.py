@@ -1199,7 +1199,9 @@ def process_bam_and_calculate_stats(
         raise RuntimeError("Shared BAM output handle requires pysam support.")
 
     cmd_out = [samtools_exec, 'view', '-b', '-@', str(threads), '-o', out_bam, '-']
-    proc_out = subprocess.Popen(cmd_out, stdin=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=buf_size)
+    # stderr must NOT be PIPEd: nobody drains it on the success path, and a full
+    # OS pipe buffer would block samtools forever inside proc_out.wait().
+    proc_out = subprocess.Popen(cmd_out, stdin=subprocess.PIPE, text=True, bufsize=buf_size)
 
     try:
         count = 0
@@ -1292,8 +1294,8 @@ def process_bam_and_calculate_stats(
             proc_out.stdin.write(final_line + "\n")
 
     except BrokenPipeError:
-        outs, errs = proc_out.communicate()
-        if errs: print(errs)
+        # stderr is inherited (not PIPEd), so only drain stdin and reap.
+        proc_out.communicate()
         raise
     finally:
         if proc_in.stdout: proc_in.stdout.close()

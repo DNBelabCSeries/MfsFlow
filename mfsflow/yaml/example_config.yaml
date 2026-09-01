@@ -64,6 +64,14 @@ barcodes:
   BarcodeBinning: 1 #Hamming distance binning of close cell barcode sequences.
   nReadsperCell: 1 #Keep only the cell barcodes with atleast n number of reads.
 
+# Criteria used only for the report's Active wells count.
+# Set a value to ~ to disable that criterion. PE reads are counted as read pairs.
+well_qc:
+  min_reads: 1000
+  min_mapping_ratio: 0.30
+  min_genes: 100
+  min_umis: 100
+
 #Options related to counting of reads towards expression profiles
 counting_opts:
   introns: yes #can be set to no for exon-only counting.
@@ -71,7 +79,7 @@ counting_opts:
   internal_strand: 0 #Optional override for internal-read counting. Historical default for internal reads is 0.
   Ham_Dist: 1 #Hamming distance collapsing of UMI sequences.
   twoPass: no #perform basic STAR twoPass mapping
-  gene_body_max_reads: 50000000 #Target primary R1 records (PE) or reads (SE) sampled per source. 0 disables downsampling.
+  gene_body_max_reads: 12000000 #Target primary R1 records (PE) or reads (SE) sampled per source. 0 disables downsampling. Keep in sync with DEFAULT_CONFIG in config/defaults.py.
   gene_body_sample_seed: 42 #Stable hash seed for unbiased gene body coverage sampling.
 
 #Runtime resource and temporary-file options
@@ -81,6 +89,7 @@ performance_opts:
   tool_cache: ~ # Optional writable cache for bundled tools whose execute bit was lost.
   min_free_gb: 5
   disk_space_multiplier: 4.0
+  mapping_timeout_sec: ~ # Optional timeout per mapping stream; unset means no timeout.
 
 #produce stats files and plots?
 make_stats: yes

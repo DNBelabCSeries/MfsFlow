@@ -57,6 +57,14 @@ def build_base_config(args, script_dir):
         config["sample"]["sample_type"] = "discover"
         config["sample"]["sample_id"] = "discover"
 
+    # Manual and custom runs already contain an explicit user-selected well
+    # set. Keep the report-level QC thresholds disabled by default for these
+    # modes; users can enable individual criteria in the saved run config.
+    if config["sample"]["sample_type"] in {"manual", "custom"}:
+        config["well_qc"] = {
+            key: None for key in config.get("well_qc", {})
+        }
+
     samplesheet_records = load_samplesheet(args.samplesheet, args.fastqs)
     if samplesheet_records:
         fastq_pairs = [(r["read1"], r["read2"]) for r in samplesheet_records]

@@ -197,7 +197,6 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
             )
 
     log_info("Running fqfilter.py on chunks")
-    max_reads = config.get("counting_opts", {}).get("max_reads", 0)
 
     with timer.section("Filtering: fqfilter chunks", f"chunks={len(chunk_suffixes)}"):
         processes = []
@@ -221,12 +220,6 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
             if direct_samplesheet_groups:
                 start, end = batch_by_suffix[suffix]
                 cmd.extend(["--direct-fastq", "--group-start", str(start), "--group-end", str(end)])
-
-            if max_reads and int(max_reads) > 0:
-                chunk_limit = int(int(max_reads) / len(chunk_suffixes))
-                if chunk_limit < 1:
-                    chunk_limit = 1
-                cmd.extend(["--limit", str(chunk_limit)])
 
             processes.append(subprocess.Popen(cmd, stdout=run_log, stderr=subprocess.STDOUT, env=exec_env))
             if len(processes) >= max_filter_jobs:
@@ -328,6 +321,13 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
                 for proc in correct_processes:
                     proc.wait()
                     if proc.returncode != 0:
+                        # Reap the remaining sibling processes before failing so
+                        # a single bad chunk does not leave orphaned correctors.
+                        for other in correct_processes:
+                            if other.poll() is None:
+                                other.terminate()
+                        for other in correct_processes:
+                            other.wait()
                         raise RuntimeError(f"correct_BCtag failed (rc={proc.returncode}). Check {runtime.log_path} for details.")
 
                 for suffix in chunk_suffixes:

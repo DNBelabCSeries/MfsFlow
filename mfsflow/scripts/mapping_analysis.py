@@ -15,6 +15,7 @@ import collections
 import itertools
 import gzip
 import shlex
+import time
 
 try:
     from mfsflow.path_layout import barcode_dir, load_config
@@ -264,16 +265,20 @@ def setup_gtf(config, project, out_dir, samtools):
             
     return final_gtf, ""
 
-def run_star_pipe(corrector_args, star_args):
+def run_star_pipe(corrector_args, star_args, timeout=None):
     """
     Runs a pipeline: Corrector (Python) -> STAR
+
+    ``timeout`` (seconds) bounds the total wait; None waits indefinitely,
+    matching the historical behaviour. Configure it via
+    ``performance_opts.mapping_timeout_sec`` to guard against a hung STAR.
     """
     print(f"Starting Pipeline: {shlex.join(corrector_args[:3])}... -> STAR")
-    
+
     # Start Producer (Corrector)
     # Use list args to avoid shell quoting issues with many files
     p1 = subprocess.Popen(corrector_args, stdout=subprocess.PIPE)
-    
+
     # Start Consumer (STAR). argv form keeps paths and user arguments isolated.
     try:
         p2 = subprocess.Popen(star_args, stdin=p1.stdout)
@@ -282,13 +287,33 @@ def run_star_pipe(corrector_args, star_args):
         p1.terminate()
         p1.wait()
         raise
-    
+
     # Close p1's stdout in this parent process so only p2 holds it
     p1.stdout.close()
-    
-    # Wait for completion
-    p2.wait()
-    p1.wait()
+
+    # Wait for both processes against one deadline. Waiting for STAR with a
+    # timeout and then waiting for the producer indefinitely would still hang
+    # when stream_corrector got stuck after STAR exited.
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    def remaining_timeout():
+        if deadline is None:
+            return None
+        return max(0.0, deadline - time.monotonic())
+
+    try:
+        p2.wait(timeout=remaining_timeout())
+        p1.wait(timeout=remaining_timeout())
+    except subprocess.TimeoutExpired:
+        for proc in (p2, p1):
+            if proc.poll() is None:
+                proc.kill()
+        for proc in (p2, p1):
+            proc.wait()
+        raise RuntimeError(
+            f"Mapping stream timed out after {timeout}s (STAR/stream_corrector killed). "
+            "Consider raising performance_opts.mapping_timeout_sec."
+        )
     
     failures = []
     if p2.returncode != 0:
@@ -343,8 +368,7 @@ def main():
             config_dir = os.path.dirname(barcode_config_path)
             expect_id_file = os.path.join(config_dir, "expect_id_barcode.tsv")
         else:
-            root_dir = os.path.dirname(out_dir.rstrip(os.sep))
-            expect_id_file = os.path.join(root_dir, "config", "expect_id_barcode.tsv")
+            expect_id_file = os.path.join(out_dir, "config", "expect_id_barcode.tsv")
 
     if not os.path.exists(expect_id_file):
         raise FileNotFoundError(f"ID Map file not found: {expect_id_file}")
@@ -401,6 +425,21 @@ def main():
     # 4. Resource Allocation
     print(f"Allocating {num_threads} threads for sequential execution.")
 
+    raw_mapping_timeout = (config.get('performance_opts', {}) or {}).get('mapping_timeout_sec')
+    if raw_mapping_timeout in (None, "", 0, "0"):
+        mapping_timeout = None
+    else:
+        try:
+            mapping_timeout = float(raw_mapping_timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "performance_opts.mapping_timeout_sec must be a positive number"
+            ) from exc
+        if mapping_timeout <= 0:
+            raise ValueError(
+                "performance_opts.mapping_timeout_sec must be a positive number"
+            )
+
     # 5. Build STAR Commands
     read_layout = config.get('read_layout', 'SE')
     
@@ -426,7 +465,7 @@ def main():
             prefix_umi,
         )
         
-        run_star_pipe(corrector_args, cmd_umi)
+        run_star_pipe(corrector_args, cmd_umi, timeout=mapping_timeout)
         print("STAR UMI finished.")
 
     # Run Internal
@@ -446,7 +485,7 @@ def main():
             prefix_int,
         )
         
-        run_star_pipe(corrector_args, cmd_int)
+        run_star_pipe(corrector_args, cmd_int, timeout=mapping_timeout)
         print("STAR Internal finished.")
         
 

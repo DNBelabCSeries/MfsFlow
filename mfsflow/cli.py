@@ -27,7 +27,7 @@ def build_parser():
     parser.add_argument("--genomeDir", help="Reference directory containing star/ and genes/genes.gtf or genes.gtf.gz")
     parser.add_argument("--sample", help="Sample name")
     parser.add_argument("--outdir", help="Output directory (default: ./<sample_name>)")
-    parser.add_argument("--threads", type=int, help="Number of threads (default: 20; resume keeps the original value)")
+    parser.add_argument("--threads", type=int, help="Number of threads (default: 30; resume keeps the original value)")
     parser.add_argument("--tmpRoot", help="Temporary root for chunk BAM/FASTQ files, e.g. /dev/shm")
     parser.add_argument("--stage", choices=STAGE_ORDER, help="Analysis stage to start from")
     parser.add_argument(
@@ -103,7 +103,8 @@ def main(argv=None):
     if missing:
         parser.error("the following arguments are required for a new run: " + ", ".join(f"--{name}" for name in missing))
     if args.threads is None:
-        args.threads = 20
+        # Keep in sync with DEFAULT_CONFIG["num_threads"] in config/defaults.py.
+        args.threads = 30
     if args.stage is None:
         args.stage = FILTERING
 

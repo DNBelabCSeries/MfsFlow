@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from mfsflow.report import (
     calculate_summary_metrics,
     generate_multi_report,
     _process_sequencing_quality_data,
+    _process_barcode_report_data,
     _infer_transcriptome_label,
     export_deliverables_to_outs,
 )
@@ -18,6 +20,272 @@ from mfsflow.scripts.generate_stats import calculate_read_ratios
 
 
 class ReportMetadataTests(unittest.TestCase):
+    def test_well_qc_status_marks_all_failed_for_js_fallback(self):
+        # well_qc_status must carry __all_failed__ so the JS summary tables can
+        # use all-wells medians instead of rendering blanks for the Active set.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            config_dir = outdir / "config"
+            config_dir.mkdir(parents=True)
+            (config_dir / "expect_id_barcode.tsv").write_text(
+                "wellID\tumi_barcodes\tinternal_barcodes\n"
+                "P1A1\tAAAA\tCCCC\n"
+            )
+            context = {
+                "sample_type": "auto",
+                "rna_stats_table_data": json.dumps([
+                    {
+                        "wellID": "P1A1",
+                        "all_reads": 200,
+                        "internal_reads": 100,
+                        "umi_reads": 100,
+                        "MappingRatio": 0.2,
+                        "Intron_Exon_genes": 40,
+                        "Intron_Exon_umis": 50,
+                    },
+                ]),
+            }
+            config = {"sample": {"sample_type": "auto"}}
+
+            _process_barcode_report_data(outdir, context, config)
+
+            status = json.loads(context["well_qc_status_data"])
+            self.assertTrue(status.get("__all_failed__"))
+
+    def test_expected_well_matching_is_case_insensitive(self):
+        # expect_id_barcode.tsv and stats.tsv may differ in case ("p1a1" vs
+        # "P1A1"); a strict match would mark every well unexpected and zero the
+        # Active count, so matching must be case-insensitive.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            config_dir = outdir / "config"
+            config_dir.mkdir(parents=True)
+            (config_dir / "expect_id_barcode.tsv").write_text(
+                "wellID\tumi_barcodes\tinternal_barcodes\n"
+                "p1a1\tAAAA\tCCCC\n"
+            )
+            context = {
+                "sample_type": "auto",
+                "rna_stats_table_data": json.dumps([
+                    {
+                        "wellID": "P1A1",
+                        "all_reads": 2000,
+                        "internal_reads": 1000,
+                        "umi_reads": 1000,
+                        "MappingRatio": 0.8,
+                        "Intron_Exon_genes": 150,
+                        "Intron_Exon_umis": 200,
+                    },
+                ]),
+            }
+            config = {"sample": {"sample_type": "auto"}}
+
+            _process_barcode_report_data(outdir, context, config)
+
+            summary = json.loads(context["barcode_report_summary_data"])
+            self.assertEqual(summary["expected_wells"], 1)
+            self.assertEqual(summary["active_wells"], 1)
+
+    def test_active_wells_require_all_enabled_qc_thresholds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            config_dir = outdir / "config"
+            config_dir.mkdir(parents=True)
+            (config_dir / "expect_id_barcode.tsv").write_text(
+                "wellID\tumi_barcodes\tinternal_barcodes\n"
+                "P1A1\tAAAA\tCCCC\n"
+                "P1A2\tGGGG\tTTTT\n"
+            )
+            context = {
+                "sample_type": "auto",
+                "rna_stats_table_data": json.dumps([
+                    {
+                        "wellID": "P1A1",
+                        "all_reads": 2000,
+                        "internal_reads": 1000,
+                        "umi_reads": 1000,
+                        "MappingRatio": 0.8,
+                        "Intron_Exon_genes": 150,
+                        "Intron_Exon_umis": 200,
+                    },
+                    {
+                        "wellID": "P1A2",
+                        "all_reads": 2000,
+                        "internal_reads": 1000,
+                        "umi_reads": 1000,
+                        "MappingRatio": 0.8,
+                        "Intron_Exon_genes": 80,
+                        "Intron_Exon_umis": 99,
+                    },
+                    {
+                        "wellID": "UNEXPECTED",
+                        "all_reads": 5000,
+                        "internal_reads": 2500,
+                        "umi_reads": 2500,
+                        "MappingRatio": 0.9,
+                        "Intron_Exon_genes": 900,
+                        "Intron_Exon_umis": 900,
+                    },
+                ]),
+            }
+            config = {
+                "sample": {"sample_type": "auto"},
+                "well_qc": {
+                    "min_reads": 1000,
+                    "min_mapping_ratio": 0.30,
+                    "min_genes": 100,
+                    "min_umis": 100,
+                },
+            }
+
+            _process_barcode_report_data(outdir, context, config)
+
+            summary = json.loads(context["barcode_report_summary_data"])
+            self.assertEqual(summary["expected_wells"], 2)
+            self.assertEqual(summary["active_wells"], 1)
+            self.assertEqual(summary["median_reads"], 2000)
+            self.assertEqual(summary["median_genes"], 150)
+            self.assertEqual(summary["median_umis"], 200)
+            self.assertAlmostEqual(summary["median_mapping_ratio"], 0.8)
+            cards = json.loads(context["barcode_mode_cards_data"])
+            active_card = next(card for card in cards if card["label"] == "Active wells")
+            self.assertIn("UMIs: >= 100", active_card["help"])
+
+    def test_manual_mode_does_not_apply_default_well_qc_thresholds(self):
+        # Manual runs list wells explicitly, so wells are not re-filtered by
+        # the absolute thresholds unless the user configured well_qc.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            config_dir = outdir / "config"
+            config_dir.mkdir(parents=True)
+            (config_dir / "expect_id_barcode.tsv").write_text(
+                "wellID\tumi_barcodes\tinternal_barcodes\n"
+                "P1A1\tAAAA\tCCCC\n"
+                "P1A2\tGGGG\tTTTT\n"
+            )
+            context = {
+                "sample_type": "manual",
+                "rna_stats_table_data": json.dumps([
+                    {
+                        "wellID": "P1A1",
+                        "all_reads": 200,
+                        "internal_reads": 100,
+                        "umi_reads": 100,
+                        "MappingRatio": 0.5,
+                        "Intron_Exon_genes": 40,
+                        "Intron_Exon_umis": 50,
+                    },
+                    {
+                        "wellID": "P1A2",
+                        "all_reads": 150,
+                        "internal_reads": 75,
+                        "umi_reads": 75,
+                        "MappingRatio": 0.5,
+                        "Intron_Exon_genes": 30,
+                        "Intron_Exon_umis": 40,
+                    },
+                ]),
+            }
+            config = {"sample": {"sample_type": "manual"}}
+
+            _process_barcode_report_data(outdir, context, config)
+
+            summary = json.loads(context["barcode_report_summary_data"])
+            self.assertEqual(summary["expected_wells"], 2)
+            self.assertEqual(summary["active_wells"], 2)
+            self.assertFalse(summary["qc_all_failed"])
+            self.assertEqual(summary["median_reads"], 175)
+            self.assertEqual(summary["median_genes"], 35)
+
+    def test_all_wells_failing_qc_falls_back_to_all_well_medians(self):
+        # If every well fails QC, median cards must not go blank: fall back to
+        # all wells and flag it so the report can show an explicit warning.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            config_dir = outdir / "config"
+            config_dir.mkdir(parents=True)
+            (config_dir / "expect_id_barcode.tsv").write_text(
+                "wellID\tumi_barcodes\tinternal_barcodes\n"
+                "P1A1\tAAAA\tCCCC\n"
+                "P1A2\tGGGG\tTTTT\n"
+            )
+            context = {
+                "sample_type": "auto",
+                "rna_stats_table_data": json.dumps([
+                    {
+                        "wellID": "P1A1",
+                        "all_reads": 200,
+                        "internal_reads": 100,
+                        "umi_reads": 100,
+                        "MappingRatio": 0.2,
+                        "Intron_Exon_genes": 40,
+                        "Intron_Exon_umis": 50,
+                    },
+                    {
+                        "wellID": "P1A2",
+                        "all_reads": 150,
+                        "internal_reads": 75,
+                        "umi_reads": 75,
+                        "MappingRatio": 0.2,
+                        "Intron_Exon_genes": 30,
+                        "Intron_Exon_umis": 40,
+                    },
+                ]),
+            }
+            config = {"sample": {"sample_type": "auto"}}
+
+            _process_barcode_report_data(outdir, context, config)
+
+            summary = json.loads(context["barcode_report_summary_data"])
+            self.assertEqual(summary["active_wells"], 0)
+            self.assertTrue(summary["qc_all_failed"])
+            self.assertEqual(summary["median_reads"], 175)
+            self.assertEqual(summary["median_genes"], 35)
+            cards = json.loads(context["barcode_mode_cards_data"])
+            active_card = next(card for card in cards if card["label"] == "Active wells")
+            self.assertIsNotNone(active_card.get("warning"))
+            median_card = next(card for card in cards if card["label"] == "Median reads")
+            self.assertIn("all wells (no well passed QC)", median_card["help"])
+
+    def test_report_contains_qc_help_and_per_well_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            stats_dir = outdir / "stats"
+            config_dir = outdir / "config"
+            stats_dir.mkdir(parents=True)
+            config_dir.mkdir()
+            (config_dir / "expect_id_barcode.tsv").write_text(
+                "wellID\tumi_barcodes\tinternal_barcodes\nP1A1\tAAAA\tCCCC\n"
+            )
+            (stats_dir / "sample.stats.tsv").write_text(
+                "wellID\tinternal_reads\tumi_reads\tall_reads\tMappingRatio\t"
+                "Intron_Exon_genes\tIntron_Exon_umis\n"
+                "P1A1\t1000\t1000\t2000\t0.8\t150\t200\n"
+            )
+
+            report_path = generate_multi_report(
+                "sample",
+                str(outdir),
+                {
+                    "project": "sample",
+                    "out_dir": str(outdir),
+                    "sequence_files": ["sample_R1.fastq.gz"],
+                    "sample": {"sample_type": "manual"},
+                    "reference": {},
+                    "well_qc": {
+                        "min_reads": 1000,
+                        "min_mapping_ratio": 0.30,
+                        "min_genes": 100,
+                        "min_umis": 100,
+                    },
+                },
+            )
+
+            html = report_path.read_text(encoding="utf-8")
+            self.assertIn("helpButton.className = 'help-button'", html)
+            self.assertIn("A well is counted as Active", html)
+            self.assertIn("well_status", html)
+
     def test_genic_ratio_matches_report_definition(self):
         mapping, genic, legacy_exon_intron = calculate_read_ratios(
             exon_reads=60,
@@ -226,7 +494,9 @@ class ReportMetadataTests(unittest.TestCase):
 
             self.assertIn('"Total sequencing reads", "value": "100"', context["sequencing_quality_summary_data"])
             self.assertIn('"Valid barcode reads", "value": "100"', context["sequencing_quality_summary_data"])
-            self.assertIn('"Unused barcode reads", "value": "0"', context["sequencing_quality_summary_data"])
+            # Without read_stats.json, Unused is NA: raw-input minus BCstats would
+            # also count reads fqfilter dropped for quality (inflated number).
+            self.assertIn('"Unused barcode reads", "value": "NA"', context["sequencing_quality_summary_data"])
             self.assertIn('"Valid barcode rate", "value": "100.0%"', context["sequencing_quality_summary_data"])
             self.assertIn('"Read2 cDNA Q30", "value": "85.0%"', context["sequencing_quality_summary_data"])
 

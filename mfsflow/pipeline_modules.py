@@ -271,15 +271,24 @@ def split_fastq(
         
     while active_procs:
         still_active = []
+        failure = None
         for p in active_procs:
             if p.poll() is None:
                 still_active.append(p)
             else:
                 if p.returncode != 0:
-                    raise RuntimeError(f"Split command failed with rc={p.returncode}")
-                if next_job_idx < len(jobs):
+                    failure = p.returncode
+                elif next_job_idx < len(jobs):
                     still_active.append(start_job(next_job_idx))
                     next_job_idx += 1
+        if failure is not None:
+            # Terminate any still-running splits before failing so no orphan
+            # processes keep writing into the tmp merge directory.
+            for p in still_active:
+                p.terminate()
+            for p in still_active:
+                p.wait()
+            raise RuntimeError(f"Split command failed with rc={failure}")
         active_procs = still_active
         if active_procs:
             time.sleep(0.5)

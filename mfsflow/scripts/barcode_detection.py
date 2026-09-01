@@ -136,7 +136,8 @@ def cell_bc_selection(bccount_df, config):
     Known whitelist modes are intentionally strict and do not fall back to top barcodes.
     """
     barcodes_config = config['barcodes']
-    min_reads = barcodes_config.get('nReadsperCell', 10)
+    # Keep in sync with DEFAULT_CONFIG["barcodes"]["nReadsperCell"] (config/defaults.py).
+    min_reads = barcodes_config.get('nReadsperCell', 1)
     
     # Keep the full barcode table so downstream Hamming rescue can still see
     # low-count tail barcodes. Selection itself is still thresholded.

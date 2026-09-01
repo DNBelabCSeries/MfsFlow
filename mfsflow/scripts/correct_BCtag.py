@@ -36,7 +36,14 @@ def main():
     id_map = {}
     internal_bcs = set()
     if id_map_file:
-        id_map, internal_bcs = load_id_map(id_map_file)
+        # strict: a missing/corrupt ID map must abort, otherwise every CB tag
+        # would be silently wiped and 100% of reads would end up as Unused BC.
+        id_map, internal_bcs = load_id_map(id_map_file, strict=True)
+        if not id_map:
+            sys.stderr.write(
+                f"Error: ID map file loaded but contained no mappings: {id_map_file}\n"
+            )
+            sys.exit(1)
         print(f"Loaded {len(id_map)} ID mappings and {len(internal_bcs)} internal barcodes.")
 
     # Open BAM files using context managers for proper resource cleanup
