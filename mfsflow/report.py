@@ -832,6 +832,12 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
             "help": f"Median detected genes across {median_scope}, using the exon plus intron UMI matrix when available.",
         },
         {
+            "label": "Median UMIs",
+            "value": _fmt_int(summary["median_umis"]),
+            "help_title": "Median UMIs",
+            "help": f"Median unique molecular identifiers across {median_scope}, using the exon plus intron UMI matrix when available.",
+        },
+        {
             "label": "Median mapping",
             "value": _fmt_pct(summary["median_mapping_ratio"]),
             "help_title": "Median mapping",
@@ -1713,6 +1719,14 @@ def generate_multi_report(name, outdir, config):
         combined_context['plotly_loader_tag'] = '<script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>'
 
     _process_rna_data(omics_data, sample_outdir, combined_context)
+
+    # Reports can also be generated from a legacy or partial run config that
+    # has no sequence_files entry.  The barcode report data is still
+    # recoverable from stats.tsv and expect_id_barcode.tsv; populate it here so
+    # the summary-card area does not silently render as an empty gap.
+    if "barcode_mode_cards_data" not in combined_context:
+        _process_rna_stats_table_data(sample_outdir, combined_context)
+        _process_barcode_report_data(sample_outdir, combined_context, config)
 
     identifiers = set(re.findall(r"\$\{([a-zA-Z0-9_]+)\}", template_str))
     for key in identifiers:

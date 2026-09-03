@@ -1056,10 +1056,31 @@ ${plotly_loader_tag}
     const stats = parseJson('${rna_stats_table_data}', []);
     const cards = parseJson('${barcode_mode_cards_data}', []);
     const plateSummary = parseJson('${auto_plate_summary_data}', []);
-    const wellQc = parseJson('${well_qc_status_data}', {});
+    const wellQcRaw = parseJson('${well_qc_status_data}', {});
+    const wellQc = (wellQcRaw && typeof wellQcRaw === 'object' && !Array.isArray(wellQcRaw)) ? wellQcRaw : {};
+    const wellQcById = {};
+    Object.keys(wellQc).forEach(function(key) {
+        if (key !== '__all_failed__') {
+            wellQcById[String(key).trim().toUpperCase()] = wellQc[key];
+        }
+    });
+    function qcForRow(row) {
+        const key = String((row && row.wellID) || '').trim().toUpperCase();
+        return wellQcById[key] || null;
+    }
+    function wellStatus(row) {
+        const qc = qcForRow(row);
+        if (!qc) {
+            if (row && typeof row.active === 'boolean') return row.active ? 'Active' : 'Not active';
+            return 'Unknown';
+        }
+        if (qc.active === true) return 'Active';
+        const failed = Array.isArray(qc.failed) ? qc.failed.filter(Boolean) : [];
+        return failed.length ? 'Not active (' + failed.join(', ') + ')' : 'Not active';
+    }
     function isActiveRow(row) {
-        const qc = wellQc[String(row.wellID || '')];
-        return qc ? qc.active === true : true;
+        const qc = qcForRow(row);
+        return qc ? qc.active === true : !(row && row.active === false);
     }
     const activeStats = stats.filter(isActiveRow);
     const readDist = parseJson('${rna_read_distribution_bar_data}', {});
@@ -1134,7 +1155,7 @@ ${plotly_loader_tag}
         }, extra || {});
     }
     function rowClass(row, ratio) {
-        const qc = wellQc[String(row.wellID || '')];
+        const qc = qcForRow(row);
         if (row.active === false || (qc && qc.active === false)) return 'review-row';
         return '';
     }
@@ -1312,7 +1333,9 @@ ${plotly_loader_tag}
                 x: rows.map(function(w) { return w.col; }),
                 y: rows.map(function(w) { return w.row; }),
                 text: rows.map(function(w) { return w.well; }),
-                customdata: rows.map(function(w) { return w.rowLabel; }),
+                customdata: rows.map(function(w) {
+                    return [w.rowLabel, wellStatus(w.raw)];
+                }),
                 marker: {
                     size: 18,
                     color: rows.map(function(w) { return metricValue(w.raw, metric); }),
@@ -1326,7 +1349,7 @@ ${plotly_loader_tag}
                     },
                     line: { width: 0.8, color: dark ? '#475569' : '#334155' }
                 },
-                hovertemplate: '<b>%{text}</b><br>Column=%{x}<br>Row=%{customdata}<br>Value=%{marker.color}<extra></extra>'
+                hovertemplate: '<b>%{text}</b><br>Column=%{x}<br>Row=%{customdata[0]}<br>Status=%{customdata[1]}<br>Value=%{marker.color}<extra></extra>'
             };
             const layout = plotLayout({
                 title: 'Plate ' + plate + ' - ' + metric,
@@ -1376,7 +1399,7 @@ ${plotly_loader_tag}
                 const yRaw = metricValue(row, metric);
                 if (x === null || yRaw === null) return null;
                 const y = (metric === 'mappingratio' || metric === 'umifrac') ? yRaw * 100 : yRaw;
-                return { x: x, y: y, well: String(row.wellID || ''), c: y };
+                return { x: x, y: y, well: String(row.wellID || ''), status: wellStatus(row), c: y };
             }).filter(Boolean);
             if (!pts.length) {
                 plot.innerHTML = '<div class="empty">No data</div>';
@@ -1388,6 +1411,7 @@ ${plotly_loader_tag}
                 x: pts.map(function(p) { return p.x; }),
                 y: pts.map(function(p) { return p.y; }),
                 text: pts.map(function(p) { return p.well; }),
+                customdata: pts.map(function(p) { return [p.status]; }),
                 marker: {
                     size: 8,
                     opacity: 0.85,
@@ -1395,7 +1419,7 @@ ${plotly_loader_tag}
                     colorscale: qcScale,
                     showscale: false
                 },
-                hovertemplate: '<b>%{text}</b><br>All reads=%{x}<br>' + metricLabel(metric) + '=%{y}<extra></extra>'
+                hovertemplate: '<b>%{text}</b><br>All reads=%{x}<br>' + metricLabel(metric) + '=%{y}<br>Status=%{customdata[0]}<extra></extra>'
             }], plotLayout({
                 height: 330,
                 margin: { l: 68, r: 28, t: 24, b: 72 },
@@ -1630,15 +1654,7 @@ ${plotly_loader_tag}
         const statsWithDerived = stats.map(function(row) {
             const allReads = usedReads(row);
             const ratio = metricValue(row, 'genicratio');
-            const wellId = String(row.wellID || '');
-            const qc = wellQc[wellId];
-            let status = '';
-            if (qc) {
-                status = qc.active ? 'Active' : 'Not active';
-                if (!qc.active && Array.isArray(qc.failed) && qc.failed.length) {
-                    status += ' (' + qc.failed.join(', ') + ')';
-                }
-            }
+            const status = wellStatus(row);
             return Object.assign({}, row, { GenicRatio: ratio, well_status: status });
         });
         let currentRows = [...statsWithDerived];
@@ -1719,6 +1735,19 @@ ${plotly_loader_tag}
                     if (!valA) return sortAsc ? -1 : 1;
                     if (!valB) return sortAsc ? 1 : -1;
                     return sortAsc ? String(valA).localeCompare(String(valB)) : String(valB).localeCompare(String(valA));
+                }
+                if (sortCol === 'well_status') {
+                    const qcA = qcForRow(a);
+                    const qcB = qcForRow(b);
+                    const rankA = qcA ? (qcA.active === true ? 0 : 1) : (typeof a.active === 'boolean' ? (a.active ? 0 : 1) : 2);
+                    const rankB = qcB ? (qcB.active === true ? 0 : 1) : (typeof b.active === 'boolean' ? (b.active ? 0 : 1) : 2);
+                    if (rankA !== rankB) return sortAsc ? rankA - rankB : rankB - rankA;
+                    const textA = String(valA || '');
+                    const textB = String(valB || '');
+                    const textOrder = textA.localeCompare(textB);
+                    if (textOrder !== 0) return sortAsc ? textOrder : -textOrder;
+                    const wellOrder = String(a.wellID || '').localeCompare(String(b.wellID || ''));
+                    return sortAsc ? wellOrder : -wellOrder;
                 }
                 const nA = num(valA), nB = num(valB);
                 if (nA === null && nB !== null) return 1;

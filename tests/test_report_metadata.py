@@ -150,6 +150,9 @@ class ReportMetadataTests(unittest.TestCase):
             cards = json.loads(context["barcode_mode_cards_data"])
             active_card = next(card for card in cards if card["label"] == "Active wells")
             self.assertIn("UMIs: >= 100", active_card["help"])
+            median_umis_card = next(card for card in cards if card["label"] == "Median UMIs")
+            self.assertEqual(median_umis_card["value"], "200")
+            self.assertIn("Active wells", median_umis_card["help"])
 
     def test_manual_mode_does_not_apply_default_well_qc_thresholds(self):
         # Manual runs list wells explicitly, so wells are not re-filtered by
@@ -285,6 +288,54 @@ class ReportMetadataTests(unittest.TestCase):
             self.assertIn("helpButton.className = 'help-button'", html)
             self.assertIn("A well is counted as Active", html)
             self.assertIn("well_status", html)
+
+    def test_report_populates_summary_cards_for_legacy_config(self):
+        # Older saved configs may not contain sequence_files even though the
+        # report artifacts are present. The summary area must remain visible.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            stats_dir = outdir / "stats"
+            config_dir = outdir / "config"
+            stats_dir.mkdir(parents=True)
+            config_dir.mkdir()
+            (config_dir / "expect_id_barcode.tsv").write_text(
+                "wellID\tumi_barcodes\tinternal_barcodes\nP1A1\tAAAA\tCCCC\n"
+            )
+            (stats_dir / "sample.stats.tsv").write_text(
+                "wellID\tinternal_reads\tumi_reads\tall_reads\tMappingRatio\t"
+                "Intron_Exon_genes\tIntron_Exon_umis\n"
+                "P1A1\t1000\t1000\t2000\t0.8\t150\t200\n"
+            )
+
+            report_path = generate_multi_report(
+                "sample",
+                str(outdir),
+                {
+                    "project": "sample",
+                    "out_dir": str(outdir),
+                    "sample": {"sample_type": "auto"},
+                    "reference": {},
+                },
+            )
+
+            html = report_path.read_text(encoding="utf-8")
+            self.assertIn('"label": "Expected wells"', html)
+            self.assertIn('"label": "Active wells"', html)
+
+    def test_auto_and_manual_templates_expose_active_status_interactions(self):
+        template_dir = Path(__file__).resolve().parents[1] / "mfsflow" / "report_assets"
+        for template_name in ("template_auto.html", "template_manual.html"):
+            html = (template_dir / template_name).read_text(encoding="utf-8")
+            self.assertIn('id="summary-cards"', html)
+            self.assertIn("Status=%{customdata[0]}", html)
+            self.assertIn("sortCol === 'well_status'", html)
+            self.assertIn("wellStatus(row)", html)
+
+        auto_html = (template_dir / "template_auto.html").read_text(encoding="utf-8")
+        manual_html = (template_dir / "template_manual.html").read_text(encoding="utf-8")
+        self.assertIn("Status=%{customdata[1]}", auto_html)
+        self.assertIn("return qc ? qc.active === true : !(row && row.active === false);", auto_html)
+        self.assertIn("return qc ? qc.active === true : !(row && row.active === false);", manual_html)
 
     def test_genic_ratio_matches_report_definition(self):
         mapping, genic, legacy_exon_intron = calculate_read_ratios(
