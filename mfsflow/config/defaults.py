@@ -72,6 +72,8 @@ DEFAULT_CONFIG = {
         "tool_cache": None,
         "min_free_gb": 5,
         "disk_space_multiplier": 4.0,
+        # Optional cap for DGE counting and UMI-clustering workers.
+        "max_dge_workers": None,
         # Optional wall-clock limit for each corrector -> STAR stream.
         "mapping_timeout_sec": None,
     },

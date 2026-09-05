@@ -56,6 +56,9 @@ def export_h5ad(out_dir, project, config=None, main_matrix="inex.umi"):
             if cur_barcodes != barcodes:
                 raise ValueError(f"Barcode order differs in {matrix_dir}")
 
+        # Convert directly to the cell-by-gene CSR orientation. Keeping an
+        # intermediate gene-by-cell CSR copy doubles the peak memory for each
+        # matrix during H5AD export.
         matrices[matrix_type.replace(".", "_")] = matrix.T.tocsr()
 
     if not matrices:
@@ -107,7 +110,9 @@ def _read_mex(matrix_dir):
     features_path = os.path.join(matrix_dir, "features.tsv.gz")
     barcodes_path = os.path.join(matrix_dir, "barcodes.tsv.gz")
 
-    matrix = scipy.io.mmread(matrix_path).tocsr()
+    # mmread returns a sparse Matrix Market object. Leave it in its compact
+    # coordinate form until the caller transposes it once for AnnData.
+    matrix = scipy.io.mmread(matrix_path)
     genes = []
     with gzip.open(features_path, "rt") as f:
         for line in f:

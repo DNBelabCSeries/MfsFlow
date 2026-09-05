@@ -40,6 +40,20 @@ class StreamCorrectorTests(unittest.TestCase):
         self.assertEqual(read.query_sequence, "AAACCCCC")
         self.assertEqual(read.query_qualities, [30, 31, 32, 33, 34, 35, 36, 37])
 
+    def test_missing_pre_corrected_tag_falls_back_to_correction(self):
+        read = FakeRead(
+            flag=77,
+            seq="AAACCCCC",
+            qual=[30, 31, 32, 33, 34, 35, 36, 37],
+            tags={"CR": "RAWBC", "CB": "STALE"},
+        )
+
+        correction = get_or_apply_correction(read, {}, {"RAWBC": "P1A1"}, set())
+
+        self.assertEqual(correction.well_id, "P1A1")
+        self.assertEqual(read.tags["CC"], "RAWBC")
+        self.assertEqual(read.tags["CB"], "P1A1")
+
 
 if __name__ == "__main__":
     unittest.main()

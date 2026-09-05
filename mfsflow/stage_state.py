@@ -18,6 +18,15 @@ def _nonempty_file(path):
     return os.path.isfile(path) and os.path.getsize(path) > 0
 
 
+def _config_bool(value, default=False):
+    """Interpret YAML booleans plus quoted yes/no values consistently."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 def _artifact_record(path):
     stat = os.stat(path)
     return {
@@ -48,7 +57,13 @@ def _config_digest(config, digest_version=2):
         stable_config.pop("toolkit_directory", None)
         performance = stable_config.get("performance_opts")
         if isinstance(performance, dict):
-            for key in ("tmp_root", "tool_cache", "min_free_gb", "disk_space_multiplier"):
+            for key in (
+                "tmp_root",
+                "tool_cache",
+                "min_free_gb",
+                "disk_space_multiplier",
+                "max_dge_workers",
+            ):
                 performance.pop(key, None)
     encoded = json.dumps(stable_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -75,6 +90,169 @@ def _validate_gzip(path, label, full_check=True):
                     pass
     except (OSError, EOFError, gzip.BadGzipFile) as exc:
         raise RuntimeError(f"{label} is corrupt or unreadable: {path}: {exc}") from exc
+
+
+def _count_nonempty_gzip_lines(path, label):
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except (OSError, EOFError, gzip.BadGzipFile, UnicodeError) as exc:
+        raise RuntimeError(f"{label} is corrupt or unreadable: {path}: {exc}") from exc
+
+
+def _read_matrix_dimensions(path):
+    """Read Matrix Market dimensions without materialising the sparse matrix."""
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            header = handle.readline().strip()
+            if not header.startswith("%%MatrixMarket matrix coordinate"):
+                raise RuntimeError(f"invalid Matrix Market header: {path}")
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("%"):
+                    continue
+                fields = line.split()
+                if len(fields) != 3:
+                    raise RuntimeError(f"invalid Matrix Market dimensions: {path}")
+                rows, columns, entries = (int(value) for value in fields)
+                if rows < 0 or columns < 0 or entries < 0:
+                    raise RuntimeError(f"negative Matrix Market dimensions: {path}")
+                return rows, columns, entries
+    except RuntimeError:
+        raise
+    except (OSError, EOFError, gzip.BadGzipFile, UnicodeError, ValueError) as exc:
+        raise RuntimeError(f"invalid Matrix Market file: {path}: {exc}") from exc
+    raise RuntimeError(f"Matrix Market dimensions are missing: {path}")
+
+
+def _validate_matrix_entries(path, rows, columns, declared_entries):
+    """Validate Matrix Market coordinate rows during full resume checks."""
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            dimensions_seen = False
+            actual_entries = 0
+            for line_number, line in enumerate(handle, start=1):
+                line = line.strip()
+                if not line or line.startswith("%"):
+                    continue
+                if not dimensions_seen:
+                    dimensions_seen = True
+                    continue
+                fields = line.split()
+                if len(fields) < 3:
+                    raise RuntimeError(
+                        f"invalid Matrix Market entry at line {line_number}: {path}"
+                    )
+                try:
+                    row, column = int(fields[0]), int(fields[1])
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"invalid Matrix Market index at line {line_number}: {path}"
+                    ) from exc
+                if not (1 <= row <= rows and 1 <= column <= columns):
+                    raise RuntimeError(
+                        f"Matrix Market index out of range at line {line_number}: {path}"
+                    )
+                actual_entries += 1
+            if not dimensions_seen:
+                raise RuntimeError(f"Matrix Market dimensions are missing: {path}")
+            if actual_entries != declared_entries:
+                raise RuntimeError(
+                    f"Matrix Market nnz mismatch in {path}: header declares "
+                    f"{declared_entries}, found {actual_entries} entries"
+                )
+    except RuntimeError:
+        raise
+    except (OSError, EOFError, gzip.BadGzipFile, UnicodeError) as exc:
+        raise RuntimeError(f"Expression matrix is corrupt or unreadable: {path}: {exc}") from exc
+
+
+def _validate_mex_bundle(directory, full_check=False):
+    """Validate one Matrix Market expression bundle and its dimensions."""
+    matrix = os.path.join(directory, "matrix.mtx.gz")
+    features = os.path.join(directory, "features.tsv.gz")
+    barcodes = os.path.join(directory, "barcodes.tsv.gz")
+    required = (matrix, features, barcodes)
+    missing = [path for path in required if not _nonempty_file(path)]
+    if missing:
+        raise RuntimeError(
+            "Incomplete expression matrix bundle: "
+            f"{directory}; missing or empty: {', '.join(missing)}"
+        )
+
+    for path, label in (
+        (matrix, "Expression matrix"),
+        (features, "Expression features"),
+        (barcodes, "Expression barcodes"),
+    ):
+        _validate_gzip(path, label, full_check=full_check)
+
+    rows, columns, declared_entries = _read_matrix_dimensions(matrix)
+    if full_check:
+        _validate_matrix_entries(matrix, rows, columns, declared_entries)
+    feature_count = _count_nonempty_gzip_lines(features, "Expression features")
+    barcode_count = _count_nonempty_gzip_lines(barcodes, "Expression barcodes")
+    if rows != feature_count or columns != barcode_count:
+        raise RuntimeError(
+            "Expression matrix dimensions do not match annotations: "
+            f"{directory} declares {rows} x {columns}, "
+            f"but has {feature_count} features and {barcode_count} barcodes."
+        )
+
+
+def _validate_expression_bundles(runtime, full_check=False):
+    """Validate all MEX directories produced for a Counting stage."""
+    root = expression_dir(runtime.out_dir)
+    counting_opts = runtime.config.get("counting_opts", {}) or {}
+    bundle_names = ["exon.umi", "exon.read"]
+    if _config_bool(counting_opts.get("introns", True), default=True):
+        bundle_names.extend(("intron.umi", "intron.read", "inex.umi", "inex.read"))
+    required_dirs = [os.path.join(root, f"{runtime.project}.{name}") for name in bundle_names]
+    pattern = os.path.join(root, f"{runtime.project}.*")
+    candidates = [path for path in glob.glob(pattern) if os.path.isdir(path)]
+    bundle_dirs = [
+        path for path in candidates
+        if any(os.path.exists(os.path.join(path, name)) for name in (
+            "matrix.mtx.gz", "features.tsv.gz", "barcodes.tsv.gz"
+        ))
+    ]
+    missing_required = [
+        path for path in required_dirs
+        if not all(_nonempty_file(os.path.join(path, name)) for name in (
+            "matrix.mtx.gz", "features.tsv.gz", "barcodes.tsv.gz"
+        ))
+    ]
+    if missing_required:
+        raise RuntimeError(
+            "Counting is missing required expression matrix bundle(s): "
+            + ", ".join(missing_required)
+        )
+    if not bundle_dirs:
+        raise RuntimeError(
+            f"Counting completed but no expression matrix bundle was found under: {root}"
+        )
+    for directory in sorted(set(bundle_dirs) | set(required_dirs)):
+        _validate_mex_bundle(directory, full_check=full_check)
+
+
+def _validate_h5ad(path):
+    """Check the HDF5 signature without importing optional h5py."""
+    try:
+        with open(path, "rb") as handle:
+            signature = handle.read(8)
+    except OSError as exc:
+        raise RuntimeError(f"H5AD output is unreadable: {path}: {exc}") from exc
+    if signature != b"\x89HDF\r\n\x1a\n":
+        raise RuntimeError(f"H5AD output is not a valid HDF5 file: {path}")
+
+
+def _validate_required_h5ad(runtime):
+    if not _config_bool(runtime.config.get("make_h5ad", True), default=True):
+        return
+    path = os.path.join(expression_dir(runtime.out_dir), f"{runtime.project}.h5ad")
+    if not _nonempty_file(path):
+        raise RuntimeError(f"Counting is missing required H5AD output: {path}")
+    _validate_h5ad(path)
 
 
 def _quickcheck_bams(runtime, paths, unmapped=False):
@@ -200,11 +378,16 @@ def _validate_stage_outputs(runtime, stage, artifacts):
         matrix = os.path.join(expression_dir(out_dir), f"{project}.exon.umi", "matrix.mtx.gz")
         if not _nonempty_file(matrix):
             raise RuntimeError(f"Counting completed but required expression matrix is missing or empty: {matrix}")
-        _validate_gzip(matrix, "Expression matrix", full_check=False)
-    elif stage == SUMMARISING and str(runtime.config.get("make_stats", "yes")).lower() in ("yes", "true"):
+        _validate_expression_bundles(runtime, full_check=False)
+        _validate_required_h5ad(runtime)
+    elif stage == SUMMARISING and _config_bool(runtime.config.get("make_stats", True), default=True):
         table = os.path.join(stats_dir(out_dir), f"{project}.stats.tsv")
         if not _nonempty_file(table):
             raise RuntimeError(f"Summarising completed but required stats table is missing or empty: {table}")
+    if stage == COUNTING:
+        for path in artifacts:
+            if path.endswith(".h5ad"):
+                _validate_h5ad(path)
 
 
 def invalidate_stage_success(runtime, stage):
@@ -273,7 +456,7 @@ def validate_stage_manifest(runtime, stage):
 
     artifacts = payload.get("artifacts") or []
     if not artifacts:
-        if stage == SUMMARISING and str(runtime.config.get("make_stats", "yes")).lower() not in ("yes", "true", "1"):
+        if stage == SUMMARISING and not _config_bool(runtime.config.get("make_stats", True), default=True):
             return payload
         raise RuntimeError(f"Stage {stage} manifest contains no artifacts: {manifest_path}")
     changed = []
@@ -306,10 +489,12 @@ def validate_stage_manifest(runtime, stage):
     elif stage == MAPPING:
         _quickcheck_bams(runtime, [a["path"] for a in artifacts if a.get("path", "").endswith(".bam")])
     elif stage == COUNTING:
+        _validate_expression_bundles(runtime, full_check=True)
+        _validate_required_h5ad(runtime)
         for artifact in artifacts:
             path = artifact.get("path", "")
-            if path.endswith(".mtx.gz"):
-                _validate_gzip(path, "Expression matrix", full_check=True)
+            if path.endswith(".h5ad"):
+                _validate_h5ad(path)
     return payload
 
 
@@ -350,9 +535,23 @@ def validate_resume_inputs(runtime):
         if os.path.exists(os.path.join(stage_state_dir(out_dir), f"{COUNTING}.manifest.json")):
             validate_stage_manifest(runtime, COUNTING)
             return
-        required = os.path.join(expression_dir(out_dir), f"{project}.exon.umi", "matrix.mtx.gz")
+        root = expression_dir(out_dir)
+        required = os.path.join(root, f"{project}.exon.umi", "matrix.mtx.gz")
         if not _nonempty_file(required):
             raise RuntimeError(
                 f"Cannot resume from Summarising: required Counting artifact is missing or empty: {required}"
             )
-        _validate_gzip(required, "Counting expression matrix")
+        # Summarising reads the feature and barcode annotations as well as the
+        # matrix. Validate every MEX bundle here so a partial export cannot
+        # reach report generation and fail much later with an opaque error.
+        bundle_dir = os.path.dirname(required)
+        annotations = (
+            os.path.join(bundle_dir, "features.tsv.gz"),
+            os.path.join(bundle_dir, "barcodes.tsv.gz"),
+        )
+        if any(not _nonempty_file(path) for path in annotations):
+            # Preserve the more actionable matrix-corruption error when a
+            # legacy/partial run contains only a damaged matrix file.
+            _validate_gzip(required, "Counting expression matrix", full_check=True)
+        _validate_expression_bundles(runtime, full_check=True)
+        _validate_required_h5ad(runtime)

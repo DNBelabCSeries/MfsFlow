@@ -348,19 +348,31 @@ def calculate_saturation(out_dir, project):
             print(f"Error loading matrix {matrix_dir}: {e}")
             return None, 0
 
-    def calc_median_gene_curve(cell_arrays, fractions):
-        cell_arrays = [np.asarray(counts, dtype=np.float64) for counts in cell_arrays if len(counts)]
+    def calc_median_gene_curve(cell_counts, fractions, batch_size=256):
+        """Calculate the curve without concatenating the whole matrix.
+
+        The legacy fallback receives one list of positive counts per cell.
+        Processing bounded batches preserves the previous reduceat-based
+        calculation while avoiding a second full-size dense array at peak
+        memory.
+        """
+        cell_arrays = [counts for counts in cell_counts if len(counts)]
         if not cell_arrays:
             return [0.0] * len(fractions)
 
-        lengths = np.fromiter((arr.size for arr in cell_arrays), dtype=np.int64)
-        starts = np.concatenate(([0], np.cumsum(lengths)[:-1]))
-        counts = np.concatenate(cell_arrays)
-
         medians = []
         for frac in fractions:
-            probs = 1.0 - np.power(1.0 - frac, counts)
-            per_cell = np.add.reduceat(probs, starts)
+            per_cell = np.empty(len(cell_arrays), dtype=np.float64)
+            for start in range(0, len(cell_arrays), batch_size):
+                batch = cell_arrays[start:start + batch_size]
+                lengths = np.fromiter((len(values) for values in batch), dtype=np.int64)
+                starts = np.concatenate(([0], np.cumsum(lengths)[:-1]))
+                counts = np.concatenate(
+                    [np.asarray(values, dtype=np.float64) for values in batch]
+                )
+                probs = 1.0 - np.power(1.0 - frac, counts)
+                end = start + len(batch)
+                per_cell[start:end] = np.add.reduceat(probs, starts)
             medians.append(float(np.median(per_cell)))
         return medians
 
@@ -369,33 +381,30 @@ def calculate_saturation(out_dir, project):
     if umi_matrix_dir:
         print(f"Loading UMI Matrix for Median Genes: {umi_matrix_dir}")
         umi_cell_data, n_cells_u = load_per_cell_counts(umi_matrix_dir)
+        umi_cell_data = umi_cell_data or {}
         print(f"  - Loaded {len(umi_cell_data)} cells (Header says {n_cells_u})")
         if umi_cell_data:
             print("Calculating Median Genes (UMI)...")
-            # Optimize: Convert lists to numpy arrays once
-            cell_arrays = [np.array(counts, dtype=np.int64) for counts in umi_cell_data.values()]
-            
             # Debug stats
-            total_counts = [c.sum() for c in cell_arrays]
+            total_counts = [sum(counts) for counts in umi_cell_data.values()]
             print(f"  - UMI Counts per cell: Mean={np.mean(total_counts):.1f}, Median={np.median(total_counts):.1f}")
-            
-            median_genes_umi = calc_median_gene_curve(cell_arrays, fractions)
+
+            median_genes_umi = calc_median_gene_curve(umi_cell_data.values(), fractions)
 
     # 3. Median Genes (Read)
     median_genes_read = []
     if read_matrix_dir:
         print(f"Loading Read Matrix for Median Genes: {read_matrix_dir}")
         read_cell_data, n_cells_r = load_per_cell_counts(read_matrix_dir)
+        read_cell_data = read_cell_data or {}
         print(f"  - Loaded {len(read_cell_data)} cells (Header says {n_cells_r})")
         if read_cell_data:
             print("Calculating Median Genes (Read)...")
-            cell_arrays = [np.array(counts, dtype=np.int64) for counts in read_cell_data.values()]
-            
             # Debug stats
-            total_counts = [c.sum() for c in cell_arrays]
+            total_counts = [sum(counts) for counts in read_cell_data.values()]
             print(f"  - Read Counts per cell: Mean={np.mean(total_counts):.1f}, Median={np.median(total_counts):.1f}")
 
-            median_genes_read = calc_median_gene_curve(cell_arrays, fractions)
+            median_genes_read = calc_median_gene_curve(read_cell_data.values(), fractions)
             
     return {
         "fractions": fractions,

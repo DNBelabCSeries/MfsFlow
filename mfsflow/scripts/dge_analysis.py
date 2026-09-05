@@ -12,7 +12,6 @@ import os
 import subprocess
 import gzip
 from collections import defaultdict, Counter
-import numpy as np
 import multiprocessing
 import json
 
@@ -24,15 +23,37 @@ except ImportError:
 try:
     from mfsflow.scripts.umi_utils import cluster_umis
     from mfsflow.scripts.h5ad_export import export_h5ad
-    from mfsflow.scripts.dge_utils import balance_reference_chunks, summarize_exon_intron_counts
+    from mfsflow.scripts.dge_utils import (
+        balance_reference_chunks,
+        dynamic_chunksize,
+        resolve_worker_count,
+        summarize_exon_intron_counts,
+        workload_order,
+    )
     from mfsflow.scripts.read_utils import is_pair_representative
     from mfsflow.path_layout import barcode_dir, expression_dir, stats_dir, load_config
 except ImportError:
     from umi_utils import cluster_umis
     from h5ad_export import export_h5ad
-    from dge_utils import balance_reference_chunks, summarize_exon_intron_counts
+    from dge_utils import (
+        balance_reference_chunks,
+        dynamic_chunksize,
+        resolve_worker_count,
+        summarize_exon_intron_counts,
+        workload_order,
+    )
     from read_utils import is_pair_representative
     from path_layout import barcode_dir, expression_dir, stats_dir, load_config
+
+
+def _as_bool(value, default=False):
+    """Interpret YAML booleans and quoted boolean values consistently."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
 
 def process_barcode_worker(args):
     """
@@ -325,42 +346,41 @@ def write_sparse_matrix(counts_dict, gene_list, gene_names_map, barcode_list, ou
     if not os.path.exists(full_out_dir):
         os.makedirs(full_out_dir)
     
-    # Use fixed lists for indices
+    # Use fixed indices and stream entries in the same column/row order as the
+    # previous lexsort implementation. The old implementation retained three
+    # Python lists plus three NumPy arrays for the entire matrix, which was a
+    # significant peak for large projects.
     gene_to_idx = {g: i for i, g in enumerate(gene_list)}
-    bc_to_idx = {b: i for i, b in enumerate(barcode_list)}
-    
-    rows = []
-    cols = []
-    data = []
 
-    for bc, gene_counts in counts_dict.items():
-        bc_idx = bc_to_idx.get(bc)
-        if bc_idx is None:
-            continue
-        for gene, count in gene_counts.items():
-            if count <= 0:
+    def count_entries():
+        for barcode in barcode_list:
+            gene_counts = counts_dict.get(barcode)
+            if not gene_counts:
                 continue
-            gene_idx = gene_to_idx.get(gene)
-            if gene_idx is None:
-                continue
-            cols.append(bc_idx)
-            rows.append(gene_idx)
-            data.append(int(count))
+            for gene, count in gene_counts.items():
+                if count > 0 and gene_to_idx.get(gene) is not None:
+                    yield 1
 
-    if data:
-        rows = np.asarray(rows, dtype=np.int32)
-        cols = np.asarray(cols, dtype=np.int32)
-        data = np.asarray(data, dtype=np.int32)
-        order = np.lexsort((rows, cols))
-        rows = rows[order]
-        cols = cols[order]
-        data = data[order]
-        nnz = int(data.size)
-    else:
-        rows = np.asarray([], dtype=np.int32)
-        cols = np.asarray([], dtype=np.int32)
-        data = np.asarray([], dtype=np.int32)
-        nnz = 0
+    def iter_entries():
+        for col_idx, barcode in enumerate(barcode_list):
+            gene_counts = counts_dict.get(barcode)
+            if not gene_counts:
+                continue
+            entries = []
+            for gene, count in gene_counts.items():
+                if count <= 0:
+                    continue
+                row_idx = gene_to_idx.get(gene)
+                if row_idx is not None:
+                    entries.append((row_idx, int(count)))
+            for row_idx, count in sorted(entries):
+                yield row_idx + 1, col_idx + 1, count
+
+    # Matrix Market requires nnz before the data lines. Iterate twice instead
+    # of materialising all entries; the count dictionaries are already in RAM.
+    # The first pass only counts entries; sorting is needed only for the
+    # writing pass and should not be repeated unnecessarily.
+    nnz = sum(count_entries())
 
     matrix_file_gz = os.path.join(full_out_dir, "matrix.mtx.gz")
     
@@ -372,10 +392,13 @@ def write_sparse_matrix(counts_dict, gene_list, gene_names_map, barcode_list, ou
         f.write("%\n")
         f.write(f"{len(gene_list)} {len(barcode_list)} {nnz}\n")
         
-        chunk_size = 100_000
-        for start in range(0, nnz, chunk_size):
-            end = min(start + chunk_size, nnz)
-            lines = [f"{int(rows[i]) + 1} {int(cols[i]) + 1} {int(data[i])}\n" for i in range(start, end)]
+        lines = []
+        for row_idx, col_idx, count in iter_entries():
+            lines.append(f"{row_idx} {col_idx} {count}\n")
+            if len(lines) >= 100_000:
+                f.write("".join(lines))
+                lines.clear()
+        if lines:
             f.write("".join(lines))
 
     with gzip.open(os.path.join(full_out_dir, "barcodes.tsv.gz"), "wt") as f:
@@ -413,10 +436,10 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
     project = config['project']
     out_dir = config['out_dir']
     ham_dist = int(config['counting_opts'].get('Ham_Dist', 0))
-    count_introns = config.get('counting_opts', {}).get('introns', True)
-    make_stats = bool(config.get('make_stats', True))
-    make_sorted_bam = bool(config.get('make_sorted_bam', False))
-    make_ub_bam = bool(config.get('make_ub_bam', False))
+    count_introns = _as_bool(config.get('counting_opts', {}).get('introns', True), default=True)
+    make_stats = _as_bool(config.get('make_stats', True), default=True)
+    make_sorted_bam = _as_bool(config.get('make_sorted_bam', False))
+    make_ub_bam = _as_bool(config.get('make_ub_bam', False))
     need_correction_map = bool(ham_dist > 0 and (make_sorted_bam or make_ub_bam))
     collect_global_umis = bool(make_stats)
     samtools_exec = sys.argv[2] # Passed from main
@@ -465,7 +488,12 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
             references = list(b.references)
             mapped_counts = {stat.contig: stat.mapped for stat in b.get_index_statistics()}
 
-        worker_count = max(1, min(int(threads), len(references) or 1))
+        performance_opts = config.get("performance_opts", {}) or {}
+        worker_count = resolve_worker_count(
+            threads,
+            len(references) or 1,
+            performance_opts,
+        )
         ref_chunks = balance_reference_chunks(references, mapped_counts, worker_count)
         
         print(f"Pass 1: Parallel Counting ({worker_count} workers, {len(ref_chunks)} chunks)...")
@@ -540,49 +568,98 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
             for gene in read_counts_raw['intron'][bc]:
                 final_read_counts['inex'][bc][gene] += read_counts_raw['intron'][bc][gene]
 
+        # final_read_counts owns the same per-barcode dictionaries; the outer
+        # raw container is no longer needed after the inex merge.
+        del read_counts_raw
+
         # Calculate UMI Counts (with Clustering)
-        all_bcs_umis = list(set(umi_data['exon'].keys()) | set(umi_data['intron'].keys()) | set(global_umi_raw.keys()))
-        total_bcs = len(all_bcs_umis)
+        all_bcs_umis = list(
+            set(umi_data['exon'].keys())
+            | set(umi_data['intron'].keys())
+            | set(global_umi_raw.keys())
+        )
+        umi_workloads = []
+        for bc in all_bcs_umis:
+            workload = 0
+            for ftype in ("exon", "intron"):
+                workload += sum(
+                    len(umis)
+                    for umis in umi_data[ftype].get(bc, {}).values()
+                )
+            if collect_global_umis:
+                workload += len(global_umi_raw.get(bc, {}))
+            umi_workloads.append((bc, workload))
+        cluster_barcodes = workload_order(umi_workloads)
+        total_bcs = len(cluster_barcodes)
+        cluster_workers = resolve_worker_count(threads, total_bcs or 1, performance_opts)
+        cluster_chunksize = dynamic_chunksize(total_bcs or 1, cluster_workers)
         
         print(
-            f"Clustering UMIs for {total_bcs} barcodes using {worker_count} workers "
+            f"Clustering UMIs for {total_bcs} barcodes using {cluster_workers} workers "
             f"(Ham_Dist={ham_dist}, correction_map={'on' if need_correction_map else 'off'}, "
-            f"saturation={'on' if collect_global_umis else 'off'})..."
+            f"saturation={'on' if collect_global_umis else 'off'}, chunksize={cluster_chunksize})..."
         )
         
-        # Modified worker to also cluster global UMIs
-        # cluster_with_global is now defined at module level
-
-        pool_args = []
-        for bc in all_bcs_umis:
-            pool_args.append((
-                bc,
-                umi_data['exon'].get(bc, {}),
-                umi_data['intron'].get(bc, {}),
-                global_umi_raw.get(bc, {}) if collect_global_umis else {},
-                ham_dist,
-                need_correction_map,
-                collect_global_umis,
-                collect_global_umis,
-            ))
-            
         correction_map = defaultdict(lambda: defaultdict(dict)) if need_correction_map else {}
-        
-        with multiprocessing.Pool(worker_count) as pool:
-             for i, res in enumerate(pool.imap_unordered(cluster_with_global, pool_args, chunksize=20)):
-                if i % 100 == 0: print(f"Clustering {i}/{total_bcs}...", end='\r')
-                
-                bc, c_ex, c_in, c_inex, corr, g_dist, gene_dist = res
-                
-                if c_ex: final_umi_counts['exon'][bc].update(c_ex)
-                if c_in: final_umi_counts['intron'][bc].update(c_in)
-                if c_inex: final_umi_counts['inex'][bc].update(c_inex)
-                if need_correction_map and corr:
-                    correction_map[bc].update(corr)
-                if collect_global_umis and g_dist:
-                    global_umi_freq.update(g_dist)
-                if collect_global_umis and gene_dist:
-                    gene_umi_freq.update(gene_dist)
+
+        # Submit bounded batches so completed raw UMI maps can be released
+        # before the next batch is queued. This keeps the parent-process peak
+        # bounded without changing the per-barcode clustering result.
+        cluster_batch_size = max(8, min(256, cluster_workers * 8))
+        processed_bcs = 0
+        with multiprocessing.Pool(cluster_workers) as pool:
+            for batch_start in range(0, total_bcs, cluster_batch_size):
+                batch_bcs = cluster_barcodes[batch_start:batch_start + cluster_batch_size]
+                batch_args = [
+                    (
+                        bc,
+                        umi_data['exon'].get(bc, {}),
+                        umi_data['intron'].get(bc, {}),
+                        global_umi_raw.get(bc, {}) if collect_global_umis else {},
+                        ham_dist,
+                        need_correction_map,
+                        collect_global_umis,
+                        collect_global_umis,
+                    )
+                    for bc in batch_bcs
+                ]
+                for res in pool.imap_unordered(
+                    cluster_with_global,
+                    batch_args,
+                    chunksize=cluster_chunksize,
+                ):
+                    processed_bcs += 1
+                    if processed_bcs % 100 == 0 or processed_bcs == total_bcs:
+                        print(f"Clustering {processed_bcs}/{total_bcs}...", end='\r')
+
+                    bc, c_ex, c_in, c_inex, corr, g_dist, gene_dist = res
+
+                    if c_ex: final_umi_counts['exon'][bc].update(c_ex)
+                    if c_in: final_umi_counts['intron'][bc].update(c_in)
+                    if c_inex: final_umi_counts['inex'][bc].update(c_inex)
+                    if need_correction_map and corr:
+                        correction_map[bc].update(corr)
+                    if collect_global_umis and g_dist:
+                        global_umi_freq.update(g_dist)
+                    if collect_global_umis and gene_dist:
+                        gene_umi_freq.update(gene_dist)
+
+                for bc in batch_bcs:
+                    umi_data['exon'].pop(bc, None)
+                    umi_data['intron'].pop(bc, None)
+                    if collect_global_umis:
+                        global_umi_raw.pop(bc, None)
+                del batch_args
+                del batch_bcs
+
+        # These structures are only inputs to the clustering pass. Release
+        # them before constructing/writing the matrices and optional H5AD.
+        del umi_data
+        del all_bcs_umis
+        del umi_workloads
+        del cluster_barcodes
+        if collect_global_umis:
+            del global_umi_raw
 
         print("\nWriting Matrices...")
         
@@ -634,7 +711,13 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
             json.dump(cell_matrix_stats, handle, separators=(",", ":"))
         print(f"Cell matrix QC summary written: {cell_stats_path}")
 
-        if bool(config.get('make_h5ad', True)):
+        # Matrix files and the compact QC summary are now the durable outputs.
+        # Release the large in-memory count maps before optional H5AD export,
+        # which reads the matrices back into sparse structures.
+        del final_umi_counts
+        del final_read_counts
+
+        if _as_bool(config.get('make_h5ad', True), default=True):
             print("Exporting combined H5AD...")
             h5ad_path = export_h5ad(out_dir, project, config=config)
             print(f"H5AD written: {h5ad_path}")
@@ -680,8 +763,8 @@ def main():
     if not os.path.exists(input_bam):
         print(f"Error: Input BAM {input_bam} not found.")
         sys.exit(1)
-    make_sorted_bam = bool(config.get('make_sorted_bam', False))
-    make_ub_bam = bool(config.get('make_ub_bam', False))
+    make_sorted_bam = _as_bool(config.get('make_sorted_bam', False))
+    make_ub_bam = _as_bool(config.get('make_ub_bam', False))
     out_bam = None
     if make_sorted_bam:
         out_bam = os.path.join(out_dir, f"{project}.filtered.Aligned.GeneTagged.UBcorrected.sorted.bam")

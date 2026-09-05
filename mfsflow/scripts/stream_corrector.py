@@ -19,13 +19,23 @@ except ImportError:
 
 
 def get_or_apply_correction(read, bc_map, id_map, internal_bcs):
-    if read.has_tag("CC") and read.has_tag("CB"):
+    # Fetch each tag once. This function runs for every BAM record in the
+    # streaming Mapping path, so has_tag()+get_tag() pairs add measurable C
+    # extension overhead on large libraries.
+    try:
         corrected_bc = read.get_tag("CC")
-        raw_bc = read.get_tag("CR") if read.has_tag("CR") else corrected_bc
+        well_id = read.get_tag("CB")
+    except KeyError:
+        return correct_read_barcode(read, bc_map, id_map, internal_bcs)
+    try:
+        raw_bc = read.get_tag("CR")
+    except KeyError:
+        raw_bc = corrected_bc
+    if corrected_bc and well_id:
         return BarcodeCorrection(
             raw_bc=raw_bc,
             corrected_bc=corrected_bc,
-            well_id=read.get_tag("CB"),
+            well_id=well_id,
             is_internal=corrected_bc in internal_bcs,
         )
     return correct_read_barcode(read, bc_map, id_map, internal_bcs)

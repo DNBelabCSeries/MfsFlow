@@ -119,6 +119,34 @@ def _default_placeholder_value(name):
     return ""
 
 
+def _js_json_literal(value, name):
+    """Return a JSON value safe to inline in a ``<script>`` block.
+
+    Report data is already serialized by the Python builders. Passing that
+    JSON through a quoted JavaScript string is fragile: an escaped newline in
+    a JSON string becomes a real newline while JavaScript parses the outer
+    string, so ``JSON.parse`` fails and silently returns the fallback value.
+    Inline the parsed value directly instead, and escape HTML-significant
+    characters so a data value cannot terminate the surrounding script tag.
+    """
+    fallback = {} if name in _JSON_OBJECT_PLACEHOLDERS else []
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        parsed = fallback
+    if not isinstance(parsed, (dict, list)):
+        parsed = fallback
+    literal = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+    return (
+        literal
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 def _load_logo_data_uri(template_dir):
     for name in ("logo.png", "logo.svg", "logo.jpg", "logo.jpeg", "logo.ico"):
         path = template_dir / name
@@ -601,6 +629,7 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
     all_read_genes = []
     all_umis = []
     all_mapping_ratios = []
+    fallback_reads = []
     active = 0
     plate_ids = set()
     manual_rows = []
@@ -670,6 +699,7 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
         # may be stale or diagnostic artifacts and must not affect report
         # medians even when no expected well passes QC.
         if is_expected:
+            fallback_reads.append(all_reads)
             if gene_val is not None:
                 all_genes.append(gene_val)
             if read_gene_val is not None:
@@ -776,7 +806,7 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
     # all-wells medians too instead of rendering blanks for the Active subset.
     well_qc_status["__all_failed__"] = qc_all_failed
     if qc_all_failed:
-        summary["median_reads"] = _median(total_reads)
+        summary["median_reads"] = _median(fallback_reads)
         summary["median_genes"] = _median(all_genes)
         summary["median_read_genes"] = _median(all_read_genes)
         summary["median_umis"] = _median(all_umis)
@@ -1725,8 +1755,18 @@ def generate_multi_report(name, outdir, config):
     # recoverable from stats.tsv and expect_id_barcode.tsv; populate it here so
     # the summary-card area does not silently render as an empty gap.
     if "barcode_mode_cards_data" not in combined_context:
-        _process_rna_stats_table_data(sample_outdir, combined_context)
-        _process_barcode_report_data(sample_outdir, combined_context, config)
+        try:
+            _process_rna_stats_table_data(sample_outdir, combined_context)
+            _process_barcode_report_data(sample_outdir, combined_context, config)
+        except Exception as exc:
+            # The templates inline this value verbatim (no parseJson fallback),
+            # so a missing key would emit invalid JS and break every chart on
+            # the page. Degrade to an empty card list instead.
+            logger.warning(
+                "Failed to rebuild barcode report data; summary cards render empty: %s",
+                exc,
+            )
+            combined_context.setdefault("barcode_mode_cards_data", "[]")
 
     identifiers = set(re.findall(r"\$\{([a-zA-Z0-9_]+)\}", template_str))
     for key in identifiers:
@@ -1734,6 +1774,12 @@ def generate_multi_report(name, outdir, config):
             continue
         if key not in combined_context:
             combined_context[key] = _default_placeholder_value(key)
+
+    # JSON placeholders are inserted as JavaScript literals. This avoids the
+    # lossy quoted-string -> JSON.parse round trip and keeps all report data
+    # consistent with the summary-card fix.
+    for key in identifiers & (_JSON_ARRAY_PLACEHOLDERS | _JSON_OBJECT_PLACEHOLDERS):
+        combined_context[key] = _js_json_literal(combined_context.get(key), key)
 
     report_html = template.safe_substitute(combined_context)
 

@@ -1,6 +1,9 @@
 import os
 import json
+import re
+import shutil
 import sys
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -233,6 +236,17 @@ class ReportMetadataTests(unittest.TestCase):
                         "Intron_Exon_genes": 30,
                         "Intron_Exon_umis": 40,
                     },
+                    {
+                        # This diagnostic row must not enter the all-wells
+                        # fallback because it is absent from the expected table.
+                        "wellID": "UNEXPECTED",
+                        "all_reads": 10000,
+                        "internal_reads": 5000,
+                        "umi_reads": 5000,
+                        "MappingRatio": 0.2,
+                        "Intron_Exon_genes": 3000,
+                        "Intron_Exon_umis": 4000,
+                    },
                 ]),
             }
             config = {"sample": {"sample_type": "auto"}}
@@ -289,6 +303,48 @@ class ReportMetadataTests(unittest.TestCase):
             self.assertIn("A well is counted as Active", html)
             self.assertIn("well_status", html)
 
+    def test_generated_report_inline_javascript_passes_node_syntax_check(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is not installed")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "XPRESS_PROCESSING"
+            stats_dir = outdir / "stats"
+            config_dir = outdir / "config"
+            stats_dir.mkdir(parents=True)
+            config_dir.mkdir()
+            (config_dir / "expect_id_barcode.tsv").write_text(
+                "wellID\tumi_barcodes\tinternal_barcodes\nP1A1\tAAAA\tCCCC\n"
+            )
+            (stats_dir / "sample.stats.tsv").write_text(
+                "wellID\tinternal_reads\tumi_reads\tall_reads\tMappingRatio\t"
+                "Intron_Exon_genes\tIntron_Exon_umis\n"
+                "P1A1\t1000\t1000\t2000\t0.8\t150\t200\n"
+            )
+
+            report_path = generate_multi_report(
+                "sample",
+                str(outdir),
+                {
+                    "project": "sample",
+                    "out_dir": str(outdir),
+                    "sample": {"sample_type": "auto"},
+                    "reference": {},
+                },
+            )
+            html = report_path.read_text(encoding="utf-8")
+            scripts = [script for script in re.findall(r"<script[^>]*>(.*?)</script>", html, re.S) if script.strip()]
+            self.assertGreaterEqual(len(scripts), 1)
+            for index, script in enumerate(scripts):
+                script_path = Path(tmpdir) / f"report_script_{index}.js"
+                script_path.write_text(script, encoding="utf-8")
+                result = subprocess.run(
+                    [node, "--check", str(script_path)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_report_populates_summary_cards_for_legacy_config(self):
         # Older saved configs may not contain sequence_files even though the
         # report artifacts are present. The summary area must remain visible.
@@ -319,8 +375,12 @@ class ReportMetadataTests(unittest.TestCase):
             )
 
             html = report_path.read_text(encoding="utf-8")
-            self.assertIn('"label": "Expected wells"', html)
-            self.assertIn('"label": "Active wells"', html)
+            cards_line = next(line for line in html.splitlines() if "const cards = " in line)
+            cards_payload = cards_line.split("const cards = ", 1)[1].rsplit(";", 1)[0]
+            cards = json.loads(cards_payload)
+            self.assertEqual(len(cards), 7)
+            self.assertIn("Expected wells", [card["label"] for card in cards])
+            self.assertIn("Active wells", [card["label"] for card in cards])
 
     def test_auto_and_manual_templates_expose_active_status_interactions(self):
         template_dir = Path(__file__).resolve().parents[1] / "mfsflow" / "report_assets"
@@ -330,6 +390,9 @@ class ReportMetadataTests(unittest.TestCase):
             self.assertIn("Status=%{customdata[0]}", html)
             self.assertIn("sortCol === 'well_status'", html)
             self.assertIn("wellStatus(row)", html)
+            self.assertIn("const cards = ${barcode_mode_cards_data};", html)
+            self.assertIn("const stats = ${rna_stats_table_data};", html)
+            self.assertIn("const wellQcRaw = ${well_qc_status_data};", html)
 
         auto_html = (template_dir / "template_auto.html").read_text(encoding="utf-8")
         manual_html = (template_dir / "template_manual.html").read_text(encoding="utf-8")

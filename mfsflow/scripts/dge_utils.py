@@ -1,6 +1,47 @@
 """Dependency-light helpers for DGE analysis."""
 
 
+def resolve_worker_count(requested, task_count, performance_opts=None):
+    """Resolve a bounded worker count for DGE passes.
+
+    ``max_dge_workers`` is intentionally opt-in so existing runs keep their
+    historical parallelism. It provides a simple guardrail for hosts where
+    the command-line thread count exceeds the available memory.
+    """
+    requested = max(1, int(requested))
+    task_count = max(1, int(task_count))
+    options = performance_opts or {}
+    cap = options.get("max_dge_workers")
+    if cap not in (None, ""):
+        try:
+            cap = int(cap)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("performance_opts.max_dge_workers must be an integer") from exc
+        if cap < 1:
+            raise ValueError("performance_opts.max_dge_workers must be positive")
+        requested = min(requested, cap)
+    return min(requested, task_count)
+
+
+def workload_order(workloads):
+    """Return barcode ids in deterministic, heaviest-first order."""
+    return [
+        barcode
+        for barcode, _weight in sorted(
+            workloads,
+            key=lambda item: (-int(item[1]), str(item[0])),
+        )
+    ]
+
+
+def dynamic_chunksize(task_count, worker_count, max_chunks_per_worker=4, max_chunksize=20):
+    """Choose a small pool chunksize while retaining enough work stealing."""
+    task_count = max(1, int(task_count))
+    worker_count = max(1, int(worker_count))
+    target_chunks = max(1, worker_count * int(max_chunks_per_worker))
+    return max(1, min(int(max_chunksize), (task_count + target_chunks - 1) // target_chunks))
+
+
 def balance_reference_chunks(references, mapped_counts, worker_count):
     """Balance references by indexed mapped-read counts using greedy bin packing."""
     references = list(references)

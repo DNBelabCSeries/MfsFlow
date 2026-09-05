@@ -1,3 +1,4 @@
+import gzip
 import json
 import os
 import tempfile
@@ -6,15 +7,16 @@ import importlib.util
 from types import SimpleNamespace
 from unittest import mock
 
-from mfsflow.path_layout import stage_state_dir
+from mfsflow.path_layout import expression_dir, stage_state_dir
 from mfsflow.stage_state import (
     _quickcheck_bams,
     _validate_gzip,
     invalidate_stage_success,
     record_stage_success,
+    validate_resume_inputs,
     validate_stage_manifest,
 )
-from mfsflow.stages import FILTERING, MAPPING
+from mfsflow.stages import COUNTING, FILTERING, MAPPING
 
 
 class StageStateTests(unittest.TestCase):
@@ -23,8 +25,44 @@ class StageStateTests(unittest.TestCase):
             project="sample",
             out_dir=outdir,
             tmp_merge_path=os.path.join(outdir, "intermediate", "tmp_merge"),
-            config={"make_stats": True},
+            config={
+                "make_stats": True,
+                "make_h5ad": False,
+                "counting_opts": {"introns": False},
+            },
+            which_stage=COUNTING,
         )
+
+    @staticmethod
+    def write_mex_bundle(
+        outdir,
+        rows=2,
+        columns=2,
+        feature_rows=None,
+        barcode_rows=None,
+        entry="1 1 1",
+        declared_entries=1,
+    ):
+        bundles = [
+            os.path.join(expression_dir(outdir), "sample.exon.umi"),
+            os.path.join(expression_dir(outdir), "sample.exon.read"),
+        ]
+        for bundle in bundles:
+            os.makedirs(bundle)
+        feature_rows = feature_rows if feature_rows is not None else rows
+        barcode_rows = barcode_rows if barcode_rows is not None else columns
+        for bundle in bundles:
+            with gzip.open(os.path.join(bundle, "matrix.mtx.gz"), "wt") as handle:
+                handle.write("%%MatrixMarket matrix coordinate integer general\n")
+                handle.write("%\n")
+                handle.write(f"{rows} {columns} {declared_entries}\n{entry}\n")
+            with gzip.open(os.path.join(bundle, "features.tsv.gz"), "wt") as handle:
+                for index in range(feature_rows):
+                    handle.write(f"gene{index}\tGene {index}\tGene Expression\n")
+            with gzip.open(os.path.join(bundle, "barcodes.tsv.gz"), "wt") as handle:
+                for index in range(barcode_rows):
+                    handle.write(f"BC{index}\n")
+        return bundles[0]
 
     def test_filtering_quickcheck_allows_unmapped_header(self):
         runtime = SimpleNamespace(tools=SimpleNamespace(samtools="/tools/samtools"))
@@ -127,6 +165,63 @@ class StageStateTests(unittest.TestCase):
             open(os.path.join(tmpdir, "sample.filtered.tagged.umi.Aligned.out.bam"), "wb").close()
             with self.assertRaisesRegex(RuntimeError, "missing or empty"):
                 record_stage_success(runtime, MAPPING)
+
+    def test_counting_success_validates_complete_mex_bundle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            self.write_mex_bundle(tmpdir)
+
+            manifest = record_stage_success(runtime, COUNTING)
+            self.assertTrue(manifest.exists())
+            validate_stage_manifest(runtime, COUNTING)
+
+    def test_counting_rejects_mex_dimension_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            self.write_mex_bundle(tmpdir, rows=2, columns=2, feature_rows=1)
+
+            with self.assertRaisesRegex(RuntimeError, "dimensions do not match"):
+                record_stage_success(runtime, COUNTING)
+
+    def test_counting_rejects_invalid_h5ad(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            self.write_mex_bundle(tmpdir)
+            h5ad = os.path.join(expression_dir(tmpdir), "sample.h5ad")
+            with open(h5ad, "wb") as handle:
+                handle.write(b"not an hdf5 file")
+
+            with self.assertRaisesRegex(RuntimeError, "not a valid HDF5 file"):
+                record_stage_success(runtime, COUNTING)
+
+    def test_counting_requires_intron_bundles_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            runtime.config["counting_opts"]["introns"] = True
+            self.write_mex_bundle(tmpdir)
+
+            with self.assertRaisesRegex(RuntimeError, "missing required expression matrix"):
+                record_stage_success(runtime, COUNTING)
+
+    def test_resume_validates_matrix_indices_and_nnz(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            self.write_mex_bundle(tmpdir, entry="3 1 1")
+
+            record_stage_success(runtime, COUNTING)
+            with self.assertRaisesRegex(RuntimeError, "index out of range"):
+                validate_stage_manifest(runtime, COUNTING)
+
+    def test_summarising_resume_validates_all_mex_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            runtime.which_stage = "Summarising"
+            bundle = self.write_mex_bundle(tmpdir)
+            with gzip.open(os.path.join(bundle, "features.tsv.gz"), "at") as handle:
+                handle.write("partial\n")
+
+            with self.assertRaisesRegex(RuntimeError, "dimensions do not match"):
+                validate_resume_inputs(runtime)
 
     def test_manifest_validation_rejects_changed_artifact(self):
         with tempfile.TemporaryDirectory() as tmpdir:

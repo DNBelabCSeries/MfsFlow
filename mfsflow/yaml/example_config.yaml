@@ -89,6 +89,7 @@ performance_opts:
   tool_cache: ~ # Optional writable cache for bundled tools whose execute bit was lost.
   min_free_gb: 5
   disk_space_multiplier: 4.0
+  max_dge_workers: ~ # Optional cap for DGE counting/UMI-clustering workers.
   mapping_timeout_sec: ~ # Optional timeout per mapping stream; unset means no timeout.
 
 #produce stats files and plots?

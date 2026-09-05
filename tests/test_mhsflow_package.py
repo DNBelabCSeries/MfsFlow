@@ -7,7 +7,7 @@ from mfsflow.cli import build_parser
 from mfsflow.runtime import PipelineRuntime
 from mfsflow.stages import COUNTING, FILTERING, MAPPING, STAGE_ORDER, SUMMARISING
 from mfsflow.report import _select_report_template
-from mfsflow.timer import format_duration
+from mfsflow.timer import format_duration, resource_usage_details
 
 
 class MfsflowPackageTests(unittest.TestCase):
@@ -78,6 +78,12 @@ class MfsflowPackageTests(unittest.TestCase):
     def test_duration_formatting(self):
         self.assertEqual(format_duration(12.345), "12.35s")
         self.assertEqual(format_duration(65), "1m05.00s")
+
+    def test_resource_usage_details_is_log_safe(self):
+        details = resource_usage_details()
+        if details:
+            self.assertIn("rss_peak_mb=", details)
+            self.assertNotIn("\t", details)
 
     def test_report_template_selection_uses_split_templates(self):
         template_dir = Path("/tmp/report")

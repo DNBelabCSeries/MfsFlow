@@ -1,9 +1,15 @@
 """Pipeline timing utilities."""
 
 import os
+import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - unavailable on some platforms
+    resource = None
 
 from mfsflow.logging_utils import log_error, log_info
 
@@ -18,6 +24,28 @@ def format_duration(seconds):
         return f"{int(minutes)}m{sec:05.2f}s"
     hours, minutes = divmod(minutes, 60)
     return f"{int(hours)}h{int(minutes):02d}m{sec:05.2f}s"
+
+
+def resource_usage_details():
+    """Return process and waited-child CPU/RSS metrics for timing logs."""
+    if resource is None:
+        return ""
+    self_usage = resource.getrusage(resource.RUSAGE_SELF)
+    child_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    if sys.platform == "darwin":
+        self_rss = self_usage.ru_maxrss / (1024 * 1024)
+        child_rss = child_usage.ru_maxrss / (1024 * 1024)
+    else:
+        self_rss = self_usage.ru_maxrss / 1024
+        child_rss = child_usage.ru_maxrss / 1024
+    peak_rss_mb = max(self_rss, child_rss)
+    cpu_user_sec = self_usage.ru_utime + child_usage.ru_utime
+    cpu_sys_sec = self_usage.ru_stime + child_usage.ru_stime
+    return (
+        f"rss_peak_mb={peak_rss_mb:.1f};"
+        f"cpu_user_sec={cpu_user_sec:.2f};"
+        f"cpu_sys_sec={cpu_sys_sec:.2f}"
+    )
 
 
 class PipelineTimer:
@@ -50,10 +78,12 @@ class PipelineTimer:
             yield
         except Exception:
             duration = time.perf_counter() - start
-            self.record(stage, "failed", duration, details)
+            extra = resource_usage_details()
+            self.record(stage, "failed", duration, ";".join(filter(None, (details, extra))))
             log_error(f"Failed {stage} (Duration: {format_duration(duration)})")
             raise
         else:
             duration = time.perf_counter() - start
-            self.record(stage, "ok", duration, details)
+            extra = resource_usage_details()
+            self.record(stage, "ok", duration, ";".join(filter(None, (details, extra))))
             log_info(f"Finished {stage} (Duration: {format_duration(duration)})")

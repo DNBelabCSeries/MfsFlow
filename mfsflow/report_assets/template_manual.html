@@ -1093,10 +1093,10 @@ ${plotly_loader_tag}
 
 <script>
 (function() {
-    const stats = parseJson('${rna_stats_table_data}', []);
-    const cards = parseJson('${barcode_mode_cards_data}', []);
-    const manualRows = parseJson('${manual_barcode_table_data}', []);
-    const wellQcRaw = parseJson('${well_qc_status_data}', {});
+    const stats = ${rna_stats_table_data};
+    const cards = ${barcode_mode_cards_data};
+    const manualRows = ${manual_barcode_table_data};
+    const wellQcRaw = ${well_qc_status_data};
     const wellQc = (wellQcRaw && typeof wellQcRaw === 'object' && !Array.isArray(wellQcRaw)) ? wellQcRaw : {};
     const wellQcById = {};
     Object.keys(wellQc).forEach(function(key) {
@@ -1123,15 +1123,15 @@ ${plotly_loader_tag}
         return qc ? qc.active === true : !(row && row.active === false);
     }
     const activeStats = stats.filter(isActiveRow);
-    const readDist = parseJson('${rna_read_distribution_bar_data}', {});
-    const satX = parseJson('${rna_saturation_fraction}', []);
-    const satLib = parseJson('${rna_saturation_lib_pct}', []);
-    const medUmi = parseJson('${rna_saturation_median_genes_umi}', []);
-    const medRead = parseJson('${rna_saturation_median_genes_read}', []);
-    const geneBodyX = parseJson('${rna_gene_body_percentile}', []);
-    const geneBodyUmi = parseJson('${rna_gene_body_umi_maxnorm}', []);
-    const geneBodyInt = parseJson('${rna_gene_body_internal_maxnorm}', []);
-    const sequencingQuality = parseJson('${sequencing_quality_summary_data}', []);
+    const readDist = ${rna_read_distribution_bar_data};
+    const satX = ${rna_saturation_fraction};
+    const satLib = ${rna_saturation_lib_pct};
+    const medUmi = ${rna_saturation_median_genes_umi};
+    const medRead = ${rna_saturation_median_genes_read};
+    const geneBodyX = ${rna_gene_body_percentile};
+    const geneBodyUmi = ${rna_gene_body_umi_maxnorm};
+    const geneBodyInt = ${rna_gene_body_internal_maxnorm};
+    const sequencingQuality = ${sequencing_quality_summary_data};
 
     // Dark Mode - auto follow system preference
     (function() {
@@ -1141,15 +1141,6 @@ ${plotly_loader_tag}
         mq.addEventListener('change', function(e) { apply(e.matches); });
     })();
 
-    function parseJson(raw, fallback) {
-        try {
-            const s = String(raw || '').trim();
-            if (!s) return fallback;
-            return JSON.parse(s);
-        } catch (e) {
-            return fallback;
-        }
-    }
     function el(id) { return document.getElementById(id); }
     function num(v) {
         if (v === null || v === undefined || v === '') return null;

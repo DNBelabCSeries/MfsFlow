@@ -298,17 +298,26 @@ def fast_hamming_binning(true_bcs, candidate_bcs, threshold=1, threads=1):
                 ctx = mp.get_context()
 
             chunk_size = 5000
-            cand_chunks = [cand_list[i:i+chunk_size] for i in range(0, len(cand_list), chunk_size)]
+            total_chunks = (len(cand_list) + chunk_size - 1) // chunk_size
+
+            def iter_candidate_chunks():
+                # Do not retain a second list containing every candidate
+                # barcode while the worker pool is running.
+                for start in range(0, len(cand_list), chunk_size):
+                    yield cand_list[start:start + chunk_size]
 
             with ctx.Pool(
                 processes=threads,
                 initializer=_hb_init,
                 initargs=(true_set, dict(mask_to_true), bc_len),
             ) as pool:
-                for i, out in enumerate(pool.imap_unordered(_hb_process_chunk, cand_chunks), start=1):
+                for i, out in enumerate(
+                    pool.imap_unordered(_hb_process_chunk, iter_candidate_chunks()),
+                    start=1,
+                ):
                     mapping_list.extend(out)
-                    if i % 10 == 0 or i == len(cand_chunks):
-                        print(f"  Processed chunks: {i}/{len(cand_chunks)}", end='\r')
+                    if i % 10 == 0 or i == total_chunks:
+                        print(f"  Processed chunks: {i}/{total_chunks}", end='\r')
             print()
         else:
             print(f"Starting binning: {len(true_set)} True BCs vs {len(cand_list)} Candidate BCs (threshold=1)")
