@@ -17,12 +17,44 @@ from mfsflow.report import (
     _process_sequencing_quality_data,
     _process_barcode_report_data,
     _infer_transcriptome_label,
+    _build_config_summary_html,
     export_deliverables_to_outs,
 )
 from mfsflow.scripts.generate_stats import calculate_read_ratios
 
 
 class ReportMetadataTests(unittest.TestCase):
+    def test_config_summary_groups_runtime_settings_and_hides_internal_keys(self):
+        rendered = _build_config_summary_html({
+            "project": "Sample01",
+            "which_Stage": "Filtering",
+            "read_layout": "PE",
+            "barcode_source": "read_embedded_barcode",
+            "sample": {
+                "sample_type": "discover",
+                "discovered_sample_type": "manual",
+                "discovered_sample_ids": "9",
+            },
+            "sequence_files": {
+                "file1": {
+                    "name": "/data/read_1.fq.gz",
+                    "base_definition": ["cDNA(11-90)", "UMI(1-10)"],
+                },
+            },
+            "well_qc": {"min_mapping_ratio": 0.3},
+            "make_sorted_bam": True,
+            "make_ub_bam": False,
+            "_analysis_failed": False,
+        })
+
+        self.assertIn("Barcode and filtering", rendered)
+        self.assertIn("discover -&gt; manual", rendered)
+        self.assertIn("30.0%", rendered)
+        self.assertIn("/data/read_1.fq.gz", rendered)
+        self.assertIn("Sorted UB-corrected BAM", rendered)
+        self.assertIn("Standalone UB-corrected BAM", rendered)
+        self.assertNotIn("_analysis_failed", rendered)
+
     def test_well_qc_status_marks_all_failed_for_js_fallback(self):
         # well_qc_status must carry __all_failed__ so the JS summary tables can
         # use all-wells medians instead of rendering blanks for the Active set.
@@ -378,7 +410,7 @@ class ReportMetadataTests(unittest.TestCase):
             cards_line = next(line for line in html.splitlines() if "const cards = " in line)
             cards_payload = cards_line.split("const cards = ", 1)[1].rsplit(";", 1)[0]
             cards = json.loads(cards_payload)
-            self.assertEqual(len(cards), 7)
+            self.assertEqual(len(cards), 6)
             self.assertIn("Expected wells", [card["label"] for card in cards])
             self.assertIn("Active wells", [card["label"] for card in cards])
 
@@ -399,6 +431,19 @@ class ReportMetadataTests(unittest.TestCase):
         self.assertIn("Status=%{customdata[1]}", auto_html)
         self.assertIn("return qc ? qc.active === true : !(row && row.active === false);", auto_html)
         self.assertIn("return qc ? qc.active === true : !(row && row.active === false);", manual_html)
+        self.assertIn("symbol: 'circle-open'", auto_html)
+        self.assertIn("size: 21", auto_html)
+        self.assertNotIn("name: 'Not active'", auto_html)
+        self.assertNotIn("showlegend: inactiveRows.length > 0", auto_html)
+        self.assertIn('<details class="config-details">', auto_html)
+        self.assertIn('<details class="config-details">', manual_html)
+        self.assertNotIn('<details open class="config-details">', auto_html)
+        self.assertNotIn('<details open class="config-details">', manual_html)
+        for html in (auto_html, manual_html):
+            cols_start = html.index("const cols = [")
+            cols_end = html.index(";", cols_start)
+            cols = html[cols_start:cols_end]
+            self.assertGreater(cols.index("'well_status'"), cols.index("'Intron_Exon_umis'"))
 
     def test_genic_ratio_matches_report_definition(self):
         mapping, genic, legacy_exon_intron = calculate_read_ratios(

@@ -833,10 +833,6 @@ def _process_barcode_report_data(sample_outdir, combined_context, config):
 
     cards = [
         {
-            "label": "Barcode mode",
-            "value": summary["sample_type_label"],
-        },
-        {
             "label": "Expected wells",
             "value": _fmt_int(summary["expected_wells"]),
             "help_title": "Expected wells",
@@ -951,6 +947,224 @@ def _select_report_template(sample_type, sample_outdir, template_dir, config=Non
 
     template_path = template_auto if report_mode == "auto" else template_manual
     return template_path, report_mode
+
+
+def _format_config_value(value, percent=False):
+    """Format a run-config scalar for the human-readable report summary."""
+    if value is None or value == "":
+        return "Not set"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if percent:
+        try:
+            return f"{float(value) * 100:.1f}%"
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, float):
+        return f"{value:g}"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_format_config_value(item) for item in value)
+    if isinstance(value, dict):
+        return ", ".join(
+            f"{key}: {_format_config_value(item)}"
+            for key, item in value.items()
+        )
+    return str(value)
+
+
+def _config_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _config_rows(rows):
+    rendered = []
+    for label, value, options in rows:
+        options = options or {}
+        if "value_html" in options:
+            value_html = options["value_html"]
+        else:
+            text = html.escape(
+                _format_config_value(value, percent=options.get("percent", False))
+            )
+            value_class = " config-value-code" if options.get("code") else ""
+            value_html = f'<span class="config-value{value_class}">{text}</span>'
+        rendered.append(
+            '<div class="config-row">'
+            f'<dt>{html.escape(str(label))}</dt>'
+            f'<dd>{value_html}</dd>'
+            '</div>'
+        )
+    return '<dl class="config-grid">' + "".join(rendered) + "</dl>"
+
+
+def _config_section(title, rows=None, body=None, extra_class=""):
+    content = body if body is not None else _config_rows(rows or [])
+    class_attr = f' config-section-{extra_class}' if extra_class else ""
+    return (
+        f'<section class="config-section{class_attr}">'
+        f'<h4>{html.escape(str(title))}</h4>{content}</section>'
+    )
+
+
+def _config_file_section(sequence_files):
+    items = []
+    if isinstance(sequence_files, dict):
+        file_items = sorted(sequence_files.items())
+    elif isinstance(sequence_files, list):
+        file_items = [(f"file{index}", item) for index, item in enumerate(sequence_files, 1)]
+    else:
+        file_items = []
+    for key, item in file_items:
+        if not isinstance(item, dict):
+            continue
+        label = {
+            "file1": "Read 1",
+            "file2": "Read 2",
+        }.get(str(key).lower(), str(key))
+        name = html.escape(_format_config_value(item.get("name")))
+        definitions = html.escape(
+            _format_config_value(item.get("base_definition"))
+        )
+        items.append(
+            '<div class="config-file-item">'
+            f'<div><strong>{html.escape(label)}</strong> '
+            f'<code class="config-path">{name}</code></div>'
+            f'<div class="config-file-definition">Base definition: '
+            f'<code>{definitions}</code></div>'
+            '</div>'
+        )
+    if not items:
+        items.append('<div class="config-empty">No sequence files recorded.</div>')
+    return _config_section(
+        "Input files",
+        body='<div class="config-file-list">' + "".join(items) + "</div>",
+        extra_class="wide",
+    )
+
+
+def _build_config_summary_html(config):
+    """Build a readable, sectioned configuration summary for the report.
+
+    This fully replaces the previous raw ``json.dumps`` dump: internal keys
+    (such as ``_analysis_failed``) are never rendered, and every user-supplied
+    value is HTML-escaped before being embedded.
+    """
+    config = config or {}
+    sample = config.get("sample") or {}
+    reference = config.get("reference") or {}
+    barcodes = config.get("barcodes") or {}
+    cutoffs = config.get("filter_cutoffs") or {}
+    bc_cutoff = cutoffs.get("BC_filter") or {}
+    umi_cutoff = cutoffs.get("UMI_filter") or {}
+    well_qc = config.get("well_qc") or {}
+    counting = config.get("counting_opts") or {}
+    performance = config.get("performance_opts") or {}
+    tools = config.get("tool_versions") or {}
+
+    requested_type = str(sample.get("sample_type") or "Unknown").strip()
+    discovered_type = str(sample.get("discovered_sample_type") or "").strip()
+    if discovered_type and discovered_type.lower() != requested_type.lower():
+        mode = f"{requested_type} -> {discovered_type}"
+    else:
+        mode = discovered_type or requested_type
+
+    failed = bool(config.get("_analysis_failed"))
+    status_text = "Incomplete" if failed else "Completed"
+    status_color = "bad" if failed else "ok"
+    status_html = (
+        f'<span class="config-status config-status-{status_color}">'
+        f'{status_text}</span>'
+    )
+
+    run_rows = [
+        ("Project", config.get("project"), {}),
+        ("Analysis status", None, {"value_html": status_html}),
+        (
+            "Configured stage",
+            config.get("which_stage", config.get("which_Stage")),
+            {},
+        ),
+        ("Barcode mode", mode, {}),
+        ("Sample ID", sample.get("sample_id"), {}),
+        ("Discovered sample ID(s)", sample.get("discovered_sample_ids"), {}),
+        ("Read layout", config.get("read_layout"), {}),
+        ("Barcode source", config.get("barcode_source"), {}),
+    ]
+    barcode_rows = [
+        ("Barcode file", barcodes.get("barcode_file"), {"code": True}),
+        ("Automatic binning", barcodes.get("automatic"), {}),
+        ("Barcode binning", barcodes.get("BarcodeBinning"), {}),
+        ("Reads per cell", barcodes.get("nReadsperCell"), {}),
+        ("Barcode count", barcodes.get("barcode_num"), {}),
+        ("BC quality bases", bc_cutoff.get("num_bases"), {}),
+        ("BC quality threshold", bc_cutoff.get("phred"), {}),
+        ("UMI quality bases", umi_cutoff.get("num_bases"), {}),
+        ("UMI quality threshold", umi_cutoff.get("phred"), {}),
+    ]
+    qc_rows = [
+        ("Minimum reads", well_qc.get("min_reads"), {}),
+        ("Minimum mapping ratio", well_qc.get("min_mapping_ratio"), {"percent": True}),
+        ("Minimum genes", well_qc.get("min_genes"), {}),
+        ("Minimum UMIs", well_qc.get("min_umis"), {}),
+    ]
+    counting_rows = [
+        ("Introns", counting.get("introns"), {}),
+        ("Main strand", counting.get("strand"), {}),
+        ("Internal strand", counting.get("internal_strand"), {}),
+        ("Hamming distance", counting.get("Ham_Dist"), {}),
+        ("STAR two-pass", counting.get("twoPass"), {}),
+        ("Gene-body max reads", counting.get("gene_body_max_reads"), {}),
+        ("Gene-body seed", counting.get("gene_body_sample_seed"), {}),
+    ]
+    make_sorted_bam = _config_bool(config.get("make_sorted_bam"), default=False)
+    make_ub_bam = _config_bool(config.get("make_ub_bam"), default=False)
+    output_rows = [
+        ("Generate statistics", _config_bool(config.get("make_stats"), default=True), {}),
+        ("Generate H5AD", _config_bool(config.get("make_h5ad"), default=True), {}),
+        ("Sorted UB-corrected BAM", make_sorted_bam, {}),
+        (
+            "Standalone UB-corrected BAM",
+            make_ub_bam and not make_sorted_bam,
+            {},
+        ),
+    ]
+    performance_rows = [
+        ("Streaming BC correction", performance.get("stream_bc_correction"), {}),
+        ("Maximum DGE workers", performance.get("max_dge_workers"), {}),
+        ("Minimum free disk", performance.get("min_free_gb"), {}),
+        ("Disk multiplier", performance.get("disk_space_multiplier"), {}),
+        ("Mapping timeout", performance.get("mapping_timeout_sec"), {}),
+        ("Temporary root", performance.get("tmp_root"), {"code": True}),
+        ("Tool cache", performance.get("tool_cache"), {"code": True}),
+    ]
+    reference_rows = [
+        ("STAR index", reference.get("STAR_index"), {"code": True}),
+        ("GTF file", reference.get("GTF_file"), {"code": True}),
+        ("Additional files", reference.get("additional_files"), {"code": True}),
+        ("Additional STAR parameters", reference.get("additional_STAR_params"), {"code": True}),
+    ]
+    software_rows = [("Toolkit directory", config.get("toolkit_directory"), {"code": True})]
+    software_rows.extend(
+        (f"{name} version", version, {})
+        for name, version in sorted(tools.items(), key=lambda item: str(item[0]))
+    )
+
+    sections = [
+        _config_section("Run", run_rows),
+        _config_section("Barcode and filtering", barcode_rows),
+        _config_file_section(config.get("sequence_files")),
+        _config_section("Well QC thresholds", qc_rows),
+        _config_section("Counting", counting_rows),
+        _config_section("Outputs", output_rows),
+        _config_section("Performance", performance_rows),
+        _config_section("Reference", reference_rows),
+        _config_section("Software", software_rows),
+    ]
+    return '<div class="config-sections">' + "".join(sections) + "</div>"
 
 
 def _count_lines_in_tsv_gz(path):
@@ -1725,7 +1939,7 @@ def generate_multi_report(name, outdir, config):
     combined_context['input_csv_data'] = config.get('csv_content', '')
     config_for_display = config.copy()
     config_for_display.pop('csv_content', None)
-    combined_context['config_parameters'] = json.dumps(config_for_display, indent=4, default=str)
+    combined_context['config_summary_html'] = _build_config_summary_html(config_for_display)
 
     # Handle Plotly JS loading
     plotly_candidates = [

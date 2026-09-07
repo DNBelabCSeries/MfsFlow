@@ -414,6 +414,81 @@ ${plotly_loader_tag}
         font-weight: 400;
     }
     
+    .config-details { margin-top: 20px; }
+    .config-sections {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 12px;
+    }
+    .config-section {
+        min-width: 0;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel);
+    }
+    .config-section-wide { grid-column: 1 / -1; }
+    .config-section h4 {
+        margin: 0 0 10px;
+        color: var(--text-secondary);
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.2px;
+    }
+    .config-grid { display: grid; gap: 6px; margin: 0; }
+    .config-row {
+        display: grid;
+        grid-template-columns: minmax(120px, 0.85fr) minmax(0, 1.3fr);
+        gap: 12px;
+        align-items: start;
+        padding: 5px 0;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+    }
+    .config-row:last-child { border-bottom: 0; }
+    .config-row dt { color: var(--muted); font-size: 12px; }
+    .config-row dd {
+        min-width: 0;
+        margin: 0;
+        color: var(--text);
+        font-size: 12px;
+        text-align: right;
+    }
+    .config-value {
+        display: inline-block;
+        max-width: 100%;
+        text-align: left;
+        overflow-wrap: anywhere;
+    }
+    .config-value-code,
+    .config-file-item code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 11px;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+    .config-status {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-weight: 700;
+    }
+    .config-status-ok { color: #166534; background: #dcfce7; }
+    .config-status-bad { color: #991b1b; background: #fee2e2; }
+    .config-file-list { display: grid; gap: 8px; }
+    .config-file-item {
+        padding: 8px 10px;
+        border-radius: 7px;
+        background: rgba(148, 163, 184, 0.08);
+        overflow-wrap: anywhere;
+    }
+    .config-file-definition {
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 11px;
+    }
+    .config-empty { color: var(--muted); font-size: 12px; }
+
     /* Typography */
     .muted { color: var(--muted); }
     
@@ -918,6 +993,9 @@ ${plotly_loader_tag}
         .two { grid-template-columns: 1fr; }
         .curve-grid { grid-template-columns: 1fr; }
         .cards { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+        .config-sections { grid-template-columns: 1fr; }
+        .config-section-wide { grid-column: auto; }
+        .config-row { grid-template-columns: minmax(110px, 0.8fr) minmax(0, 1.2fr); }
     }
 </style>
 </head>
@@ -1058,9 +1136,9 @@ ${plotly_loader_tag}
         <div class="quality-inline" id="q30-values" style="margin-top: 8px;">
             <div class="quality-item">No Q30 data</div>
         </div>
-        <details>
-            <summary>Configuration</summary>
-            <pre>${config_parameters}</pre>
+        <details class="config-details">
+            <summary>Configuration summary</summary>
+            ${config_summary_html}
         </details>
     </section>
 
@@ -1555,7 +1633,7 @@ ${plotly_loader_tag}
         const count = el('stats-count');
         const pagination = el('pagination');
 
-        const cols = ['wellID', 'well_status', 'umi_reads', 'internal_reads', 'MappingRatio', 'GenicRatio', 'UMIfrac', 'Intron_Exon_genes', 'Intron_Exon_umis'];
+        const cols = ['wellID', 'umi_reads', 'internal_reads', 'MappingRatio', 'GenicRatio', 'UMIfrac', 'Intron_Exon_genes', 'Intron_Exon_umis', 'well_status'];
         const colNames = {
             'wellID': 'Sample',
             'well_status': 'Well status',
