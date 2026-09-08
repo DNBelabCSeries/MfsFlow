@@ -78,9 +78,20 @@ ${plotly_loader_tag}
     .dark .stats-table-wrap th:first-child { background: #1e293b; }
     .dark .stats-table-wrap tbody tr:nth-child(even) td { background: #1a2332; }
     .dark select, .dark input {
-        background: #1e293b;
-        color: #f1f5f9;
-        border-color: #334155;
+        background-color: #1e293b;
+        color: #f8fafc;
+        border-color: #475569;
+    }
+    .dark select {
+        color-scheme: dark;
+    }
+    .dark select option {
+        background-color: #1e293b;
+        color: #f8fafc;
+    }
+    .dark select:focus, .dark input:focus {
+        border-color: #5eead4;
+        box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.18);
     }
     .dark select:hover, .dark input:hover {
         border-color: #475569;
@@ -1418,6 +1429,7 @@ ${plotly_loader_tag}
                     },
                     line: { width: 0.8, color: dark ? '#475569' : '#334155' }
                 },
+                showlegend: false,
                 hovertemplate: '<b>%{text}</b><br>Column=%{x}<br>Row=%{customdata[0]}<br>Status=%{customdata[1]}<br>Value=%{marker.color}<extra></extra>'
             };
             const inactiveRows = rows.filter(function(w) { return !isActiveRow(w.raw); });
@@ -1440,6 +1452,7 @@ ${plotly_loader_tag}
             }
             const layout = plotLayout({
                 title: 'Plate ' + plate + ' - ' + metric,
+                showlegend: false,
                 height: 520,
                 margin: { l: 62, r: 100, t: 52, b: 62 },
                 xaxis: { title: 'Column', tickmode: 'array', tickvals: xTickVals, ticktext: xTickText, range: [0.5, 24.5], fixedrange: true, zeroline: false, gridcolor: qcColors.grid, constrain: 'domain' },
@@ -1725,6 +1738,11 @@ ${plotly_loader_tag}
         const count = el('stats-count');
         const pagination = el('pagination');
 
+        function csvField(value) {
+            const text = value === null || value === undefined ? '' : String(value);
+            return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+        }
+
         const cols = ['wellID', 'umi_reads', 'internal_reads', 'MappingRatio', 'GenicRatio', 'UMIfrac', 'Intron_Exon_genes', 'Intron_Exon_umis', 'well_status'];
         const colNames = {
             'wellID': 'Well ID',
@@ -1853,11 +1871,11 @@ ${plotly_loader_tag}
 
         if (el('export-btn')) {
             el('export-btn').addEventListener('click', function() {
-                const header = cols.map(function(c) { return colNames[c]; }).join(',');
+                const header = cols.map(function(c) { return csvField(colNames[c]); }).join(',');
                 const csvRows = currentRows.map(function(row) {
-                    return cols.map(function(c) { return row[c] === null || row[c] === undefined ? '' : row[c]; }).join(',');
+                    return cols.map(function(c) { return csvField(row[c]); }).join(',');
                 });
-                const csvData = header + '\n' + csvRows.join('\n');
+                const csvData = header + '\r\n' + csvRows.join('\r\n');
                 const blob = new Blob([csvData], { type: 'text/csv' });
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');

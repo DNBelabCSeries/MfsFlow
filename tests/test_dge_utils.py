@@ -1,9 +1,20 @@
+import os
+import tempfile
 import unittest
 
 from mfsflow.scripts.dge_utils import (
+    close_pass1_store,
     dynamic_chunksize,
+    finalize_pass1_store,
+    load_pass1_global_counts,
+    load_pass1_read_counts,
+    load_pass1_umi_counts,
+    open_pass1_store,
+    pass1_barcode_workloads,
+    pass1_barcodes,
     resolve_worker_count,
     workload_order,
+    store_pass1_result,
 )
 
 
@@ -25,6 +36,39 @@ class DgeUtilsTests(unittest.TestCase):
     def test_dynamic_chunksize_leaves_work_for_stealing(self):
         self.assertEqual(dynamic_chunksize(100, 4), 7)
         self.assertEqual(dynamic_chunksize(2, 8), 1)
+
+    def test_pass1_store_round_trips_chunk_results(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            connection, path = open_pass1_store(tmpdir, "sample")
+            try:
+                store_pass1_result(
+                    connection,
+                    {
+                        "exon": {"BC1": {"G1": 3}},
+                        "intron": {"BC1": {"G1": 1}},
+                    },
+                    {
+                        "exon": {"BC1": {"G1": {"AAAA": 2}}},
+                        "intron": {"BC1": {"G1": {"AAAT": 1}}},
+                    },
+                    {"BC1": {"AAAA": 2, "AAAT": 1}},
+                )
+                finalize_pass1_store(connection)
+
+                self.assertEqual(pass1_barcodes(connection, "read"), ["BC1"])
+                self.assertEqual(load_pass1_read_counts(connection, "BC1", "exon"), {"G1": 3})
+                self.assertEqual(
+                    dict(load_pass1_umi_counts(connection, "BC1", "exon")["G1"]),
+                    {"AAAA": 2},
+                )
+                self.assertEqual(
+                    dict(load_pass1_global_counts(connection, "BC1")),
+                    {"AAAA": 2, "AAAT": 1},
+                )
+                self.assertEqual(pass1_barcode_workloads(connection, True), [("BC1", 4)])
+            finally:
+                close_pass1_store(connection, path)
+            self.assertFalse(os.path.exists(path))
 
 
 if __name__ == "__main__":

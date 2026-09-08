@@ -25,9 +25,18 @@ try:
     from mfsflow.scripts.h5ad_export import export_h5ad
     from mfsflow.scripts.dge_utils import (
         balance_reference_chunks,
+        close_pass1_store,
         dynamic_chunksize,
+        finalize_pass1_store,
+        load_pass1_global_counts,
+        load_pass1_read_counts,
+        load_pass1_umi_counts,
+        open_pass1_store,
+        pass1_barcode_workloads,
+        pass1_barcodes,
         resolve_worker_count,
         summarize_exon_intron_counts,
+        store_pass1_result,
         workload_order,
     )
     from mfsflow.scripts.read_utils import is_pair_representative
@@ -37,9 +46,18 @@ except ImportError:
     from h5ad_export import export_h5ad
     from dge_utils import (
         balance_reference_chunks,
+        close_pass1_store,
         dynamic_chunksize,
+        finalize_pass1_store,
+        load_pass1_global_counts,
+        load_pass1_read_counts,
+        load_pass1_umi_counts,
+        open_pass1_store,
+        pass1_barcode_workloads,
+        pass1_barcodes,
         resolve_worker_count,
         summarize_exon_intron_counts,
+        store_pass1_result,
         workload_order,
     )
     from read_utils import is_pair_representative
@@ -91,7 +109,14 @@ def process_barcode_worker(args):
         mapping = cluster_umis(umis_total_counts, threshold=ham_dist)
 
         if ham_dist > 0 and need_correction_map:
-            res_correction[gene] = mapping
+            # Keep a gene marker, but retain only actual substitutions. Reads
+            # whose UMI is absent from this sparse map still need the same
+            # unchanged-UB behavior in resolve_corrected_umi().
+            res_correction[gene] = {
+                child: parent
+                for child, parent in mapping.items()
+                if child != parent
+            }
 
         unique_total = set(mapping[u] for u in umis_total_counts.keys())
         res_umi_counts_inex[gene] = len(unique_total)
@@ -221,9 +246,9 @@ def resolve_corrected_umi(read, correction_map, ham_dist):
         return raw_umi, False
 
     bc_map = correction_map.get(bc)
-    if bc_map:
+    if bc_map is not None:
         gene_map = bc_map.get(gene)
-        if gene_map:
+        if gene_map is not None:
             final_umi = gene_map.get(raw_umi, raw_umi)
             return (raw_umi if final_umi is None else str(final_umi)), True
     return raw_umi, False
@@ -432,7 +457,7 @@ def cluster_with_global(bc_args):
     
     return res_bc, res_ex, res_in, res_inex, res_corr, global_dist_counts, gene_dist_counts
 
-def process_bam_and_matrix(bam_file, out_bam, config, threads):
+def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=None):
     project = config['project']
     out_dir = config['out_dir']
     ham_dist = int(config['counting_opts'].get('Ham_Dist', 0))
@@ -442,7 +467,11 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
     make_ub_bam = _as_bool(config.get('make_ub_bam', False))
     need_correction_map = bool(ham_dist > 0 and (make_sorted_bam or make_ub_bam))
     collect_global_umis = bool(make_stats)
-    samtools_exec = sys.argv[2] # Passed from main
+    if samtools_exec is None:
+        samtools_exec = config.get("samtools_exec")
+    if not samtools_exec and len(sys.argv) > 2:
+        samtools_exec = sys.argv[2]
+    samtools_exec = samtools_exec or "samtools"
     
     # Load Reference Lists
     gtf_file = os.path.join(out_dir, f"{project}.final_annot.gtf")
@@ -460,6 +489,8 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
     
     # Ensure BAM Index for Parallel Access
     temp_sorted_bam = None
+    pass1_store_conn = None
+    pass1_store_path = None
     try:
         if not os.path.exists(bam_file + ".bai"):
             print(f"Indexing BAM {bam_file} for parallel processing...")
@@ -499,46 +530,43 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
         print(f"Pass 1: Parallel Counting ({worker_count} workers, {len(ref_chunks)} chunks)...")
         
         # --- PASS 1: Parallel Counting ---
-        read_counts_raw = {
-            'exon': defaultdict(lambda: defaultdict(int)),
-            'intron': defaultdict(lambda: defaultdict(int))
-        }
-        umi_data = {
-            'exon': defaultdict(lambda: defaultdict(Counter)),
-            'intron': defaultdict(lambda: defaultdict(Counter))
-        }
-        global_umi_raw = defaultdict(Counter) if collect_global_umis else {}
-        
+        # Store each chromosome-chunk result on disk. The previous in-memory
+        # reduce kept every raw UMI observation alive until clustering began,
+        # making the parent-process peak grow with the complete experiment.
+        pass1_store_conn, pass1_store_path = open_pass1_store(
+            out_dir,
+            project,
+            performance_opts.get("tmp_root"),
+        )
+        print(f"Pass 1 temporary store: {pass1_store_path}")
+
         pass1_args = [
             (bam_file, chunk, barcode_set, gene_set, count_introns, collect_global_umis)
             for chunk in ref_chunks
         ]
-        
+        expected_chunks = len(pass1_args)
         completed_chunks = 0
+        res = partial_read = partial_umi = partial_global = None
         with multiprocessing.Pool(worker_count) as pool:
             for res in pool.imap_unordered(count_worker, pass1_args):
                 completed_chunks += 1
                 partial_read, partial_umi, partial_global = res
-                
-                # Merge Global UMI (for saturation)
-                if collect_global_umis:
-                    for bc, umis in partial_global.items():
-                        global_umi_raw[bc].update(umis)
+                store_pass1_result(
+                    pass1_store_conn,
+                    partial_read,
+                    partial_umi,
+                    partial_global if collect_global_umis else {},
+                )
+                del partial_read, partial_umi, partial_global, res
 
-                # Merge logic (In-memory reduce)
-                for ftype in ['exon', 'intron']:
-                    for bc, genes in partial_read[ftype].items():
-                        for gene, count in genes.items():
-                            read_counts_raw[ftype][bc][gene] += count
-                    
-                    for bc, genes in partial_umi[ftype].items():
-                        for gene, umis in genes.items():
-                            umi_data[ftype][bc][gene].update(umis)
-
-        if completed_chunks != len(pass1_args):
+        # Do not keep the task argument list alive while the serialized store
+        # is queried for clustering.
+        del pass1_args
+        if completed_chunks != expected_chunks:
             raise RuntimeError(
-                f"DGE counting returned {completed_chunks}/{len(pass1_args)} chromosome chunks."
+                f"DGE counting returned {completed_chunks}/{expected_chunks} chromosome chunks."
             )
+        finalize_pass1_store(pass1_store_conn)
 
         print("Pass 1 Complete. Calculating Statistics...")
 
@@ -554,50 +582,38 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
         }
         
         final_read_counts = {
-            'exon': read_counts_raw['exon'],
-            'intron': read_counts_raw['intron'],
+            'exon': defaultdict(lambda: defaultdict(int)),
+            'intron': defaultdict(lambda: defaultdict(int)),
             'inex': defaultdict(lambda: defaultdict(int))
         }
 
-        # Calculate Inex Read Counts
-        for bc in read_counts_raw['exon']:
-            for gene in read_counts_raw['exon'][bc]:
-                final_read_counts['inex'][bc][gene] += read_counts_raw['exon'][bc][gene]
-                
-        for bc in read_counts_raw['intron']:
-            for gene in read_counts_raw['intron'][bc]:
-                final_read_counts['inex'][bc][gene] += read_counts_raw['intron'][bc][gene]
-
-        # final_read_counts owns the same per-barcode dictionaries; the outer
-        # raw container is no longer needed after the inex merge.
-        del read_counts_raw
+        # Rebuild read matrices one barcode at a time from the same store.
+        # Read counts are retained only in their final matrix-shaped maps.
+        for bc in pass1_barcodes(pass1_store_conn, "read"):
+            exon_counts = load_pass1_read_counts(pass1_store_conn, bc, "exon")
+            intron_counts = load_pass1_read_counts(pass1_store_conn, bc, "intron")
+            if exon_counts:
+                final_read_counts['exon'][bc].update(exon_counts)
+            if intron_counts:
+                final_read_counts['intron'][bc].update(intron_counts)
+            for gene, count in exon_counts.items():
+                final_read_counts['inex'][bc][gene] += count
+            for gene, count in intron_counts.items():
+                final_read_counts['inex'][bc][gene] += count
 
         # Calculate UMI Counts (with Clustering)
-        all_bcs_umis = list(
-            set(umi_data['exon'].keys())
-            | set(umi_data['intron'].keys())
-            | set(global_umi_raw.keys())
+        umi_workloads = pass1_barcode_workloads(
+            pass1_store_conn,
+            collect_global_umis,
         )
-        umi_workloads = []
-        for bc in all_bcs_umis:
-            workload = 0
-            for ftype in ("exon", "intron"):
-                workload += sum(
-                    len(umis)
-                    for umis in umi_data[ftype].get(bc, {}).values()
-                )
-            if collect_global_umis:
-                workload += len(global_umi_raw.get(bc, {}))
-            umi_workloads.append((bc, workload))
         cluster_barcodes = workload_order(umi_workloads)
         total_bcs = len(cluster_barcodes)
         cluster_workers = resolve_worker_count(threads, total_bcs or 1, performance_opts)
-        cluster_chunksize = dynamic_chunksize(total_bcs or 1, cluster_workers)
         
         print(
             f"Clustering UMIs for {total_bcs} barcodes using {cluster_workers} workers "
             f"(Ham_Dist={ham_dist}, correction_map={'on' if need_correction_map else 'off'}, "
-            f"saturation={'on' if collect_global_umis else 'off'}, chunksize={cluster_chunksize})..."
+            f"saturation={'on' if collect_global_umis else 'off'}, dynamic chunksize)..."
         )
         
         correction_map = defaultdict(lambda: defaultdict(dict)) if need_correction_map else {}
@@ -613,9 +629,10 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
                 batch_args = [
                     (
                         bc,
-                        umi_data['exon'].get(bc, {}),
-                        umi_data['intron'].get(bc, {}),
-                        global_umi_raw.get(bc, {}) if collect_global_umis else {},
+                        load_pass1_umi_counts(pass1_store_conn, bc, "exon"),
+                        load_pass1_umi_counts(pass1_store_conn, bc, "intron"),
+                        load_pass1_global_counts(pass1_store_conn, bc)
+                        if collect_global_umis else {},
                         ham_dist,
                         need_correction_map,
                         collect_global_umis,
@@ -623,10 +640,11 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
                     )
                     for bc in batch_bcs
                 ]
+                batch_chunksize = dynamic_chunksize(len(batch_bcs), cluster_workers)
                 for res in pool.imap_unordered(
                     cluster_with_global,
                     batch_args,
-                    chunksize=cluster_chunksize,
+                    chunksize=batch_chunksize,
                 ):
                     processed_bcs += 1
                     if processed_bcs % 100 == 0 or processed_bcs == total_bcs:
@@ -644,22 +662,16 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
                     if collect_global_umis and gene_dist:
                         gene_umi_freq.update(gene_dist)
 
-                for bc in batch_bcs:
-                    umi_data['exon'].pop(bc, None)
-                    umi_data['intron'].pop(bc, None)
-                    if collect_global_umis:
-                        global_umi_raw.pop(bc, None)
                 del batch_args
                 del batch_bcs
 
-        # These structures are only inputs to the clustering pass. Release
-        # them before constructing/writing the matrices and optional H5AD.
-        del umi_data
-        del all_bcs_umis
+        # The temporary store is no longer needed once all barcode results
+        # have been clustered and can be removed before matrix writing.
         del umi_workloads
         del cluster_barcodes
-        if collect_global_umis:
-            del global_umi_raw
+        close_pass1_store(pass1_store_conn, pass1_store_path)
+        pass1_store_conn = None
+        pass1_store_path = None
 
         print("\nWriting Matrices...")
         
@@ -742,6 +754,8 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads):
         pysam.index(out_bam)
         
     finally:
+        if pass1_store_conn is not None or pass1_store_path:
+            close_pass1_store(pass1_store_conn, pass1_store_path)
         if temp_sorted_bam and os.path.exists(temp_sorted_bam):
             print(f"Cleaning up temporary sorted BAM: {temp_sorted_bam}")
             os.remove(temp_sorted_bam)
@@ -770,7 +784,13 @@ def main():
         out_bam = os.path.join(out_dir, f"{project}.filtered.Aligned.GeneTagged.UBcorrected.sorted.bam")
     elif make_ub_bam:
         out_bam = os.path.join(out_dir, f"{project}.filtered.Aligned.GeneTagged.UBcorrected.bam")
-    process_bam_and_matrix(input_bam, out_bam, config, threads=num_threads)
+    process_bam_and_matrix(
+        input_bam,
+        out_bam,
+        config,
+        threads=num_threads,
+        samtools_exec=config.get("samtools_exec"),
+    )
     print("DGE Analysis pipeline finished.")
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from mfsflow.path_layout import expression_dir, stage_state_dir
 from mfsflow.stage_state import (
     _quickcheck_bams,
     _validate_gzip,
+    _validate_h5ad,
     invalidate_stage_success,
     record_stage_success,
     validate_resume_inputs,
@@ -193,6 +194,34 @@ class StageStateTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "not a valid HDF5 file"):
                 record_stage_success(runtime, COUNTING)
+
+    def test_counting_rejects_garbage_matrix_value_on_resume(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            bundle = self.write_mex_bundle(tmpdir, entry="1 1 garbage")
+
+            record_stage_success(runtime, COUNTING)
+            with self.assertRaisesRegex(RuntimeError, "invalid Matrix Market value"):
+                validate_stage_manifest(runtime, COUNTING)
+
+    def test_h5ad_validation_checks_structure_and_dimensions(self):
+        h5py = importlib.util.find_spec("h5py")
+        if h5py is None:
+            self.skipTest("h5py is not installed")
+        import h5py as h5
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "sample.h5ad")
+            with h5.File(path, "w") as handle:
+                handle.create_dataset("X", data=[[1, 0], [0, 2]])
+                obs = handle.create_group("obs")
+                obs.attrs["_index"] = "_index"
+                obs.create_dataset("_index", data=[b"cell1", b"cell2"])
+                var = handle.create_group("var")
+                var.attrs["_index"] = "_index"
+                var.create_dataset("_index", data=[b"gene1", b"gene2"])
+
+            _validate_h5ad(path)
 
     def test_counting_requires_intron_bundles_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:

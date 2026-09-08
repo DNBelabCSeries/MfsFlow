@@ -1,5 +1,180 @@
 """Dependency-light helpers for DGE analysis."""
 
+import os
+import pickle
+import sqlite3
+import tempfile
+from collections import Counter, defaultdict
+
+
+def open_pass1_store(out_dir, project, tmp_root=None):
+    """Create a disk-backed store for one DGE pass-1 result.
+
+    Keeping one serialized record per barcode/chunk avoids retaining the full
+    raw UMI graph in the parent process between the counting and clustering
+    passes. The caller owns the returned connection and path.
+    """
+    store_dir = os.fspath(tmp_root) if tmp_root else os.path.join(out_dir, "intermediate")
+    os.makedirs(store_dir, exist_ok=True)
+    fd, path = tempfile.mkstemp(
+        prefix=f".{project}.dge-pass1-",
+        suffix=".sqlite3",
+        dir=store_dir,
+    )
+    os.close(fd)
+    try:
+        connection = sqlite3.connect(path)
+        connection.execute(
+            "CREATE TABLE pass1_chunks ("
+            "kind TEXT NOT NULL, "
+            "ftype TEXT NOT NULL, "
+            "barcode TEXT NOT NULL, "
+            "weight INTEGER NOT NULL, "
+            "payload BLOB NOT NULL)"
+        )
+        # WAL is unnecessary for one writer and would leave sidecar files in
+        # the temporary directory. The pass is rebuilt on every run.
+        connection.execute("PRAGMA journal_mode=OFF")
+        connection.execute("PRAGMA synchronous=OFF")
+        return connection, path
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+
+
+def store_pass1_result(connection, partial_read, partial_umi, partial_global):
+    """Persist one count-worker result and release it from the caller."""
+    rows = []
+
+    for ftype in ("exon", "intron"):
+        for barcode, genes in partial_read.get(ftype, {}).items():
+            if genes:
+                rows.append(
+                    (
+                        "read",
+                        ftype,
+                        str(barcode),
+                        sum(int(count) for count in genes.values()),
+                        sqlite3.Binary(pickle.dumps(dict(genes), protocol=pickle.HIGHEST_PROTOCOL)),
+                    )
+                )
+        for barcode, genes in partial_umi.get(ftype, {}).items():
+            if genes:
+                payload = {gene: dict(umis) for gene, umis in genes.items()}
+                rows.append(
+                    (
+                        "umi",
+                        ftype,
+                        str(barcode),
+                        sum(len(umis) for umis in payload.values()),
+                        sqlite3.Binary(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)),
+                    )
+                )
+
+    for barcode, umis in (partial_global or {}).items():
+        if umis:
+            rows.append(
+                (
+                    "global",
+                    "global",
+                    str(barcode),
+                    len(umis),
+                    sqlite3.Binary(pickle.dumps(dict(umis), protocol=pickle.HIGHEST_PROTOCOL)),
+                )
+            )
+
+    if rows:
+        connection.executemany(
+            "INSERT INTO pass1_chunks(kind, ftype, barcode, weight, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+    connection.commit()
+
+
+def finalize_pass1_store(connection):
+    """Add the lookup index after pass-1 insertion is complete."""
+    connection.execute(
+        "CREATE INDEX pass1_chunks_lookup "
+        "ON pass1_chunks(kind, ftype, barcode)"
+    )
+    connection.commit()
+
+
+def close_pass1_store(connection, path):
+    """Close and remove a temporary pass-1 store."""
+    close_error = None
+    if connection is not None:
+        try:
+            connection.close()
+        except Exception as exc:  # pragma: no cover - sqlite close is normally infallible
+            close_error = exc
+    if path:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    if close_error is not None:
+        raise close_error
+
+
+def pass1_barcode_workloads(connection, include_global):
+    """Return barcode workloads using the same unique-UMI weights as before."""
+    kinds = ("umi", "global") if include_global else ("umi",)
+    placeholders = ",".join("?" for _ in kinds)
+    rows = connection.execute(
+        "SELECT barcode, SUM(weight) FROM pass1_chunks "
+        f"WHERE kind IN ({placeholders}) GROUP BY barcode",
+        kinds,
+    )
+    return [(str(barcode), int(weight or 0)) for barcode, weight in rows]
+
+
+def pass1_barcodes(connection, kind):
+    """Return distinct barcodes stored for a pass-1 result kind."""
+    rows = connection.execute(
+        "SELECT DISTINCT barcode FROM pass1_chunks WHERE kind = ? ORDER BY barcode",
+        (kind,),
+    )
+    return [str(row[0]) for row in rows]
+
+
+def _load_payloads(connection, kind, ftype, barcode):
+    return connection.execute(
+        "SELECT payload FROM pass1_chunks "
+        "WHERE kind = ? AND ftype = ? AND barcode = ?",
+        (kind, ftype, barcode),
+    )
+
+
+def load_pass1_read_counts(connection, barcode, ftype):
+    """Merge one barcode/type's per-gene read counts from disk."""
+    merged = defaultdict(int)
+    for (payload,) in _load_payloads(connection, "read", ftype, barcode):
+        for gene, count in pickle.loads(payload).items():
+            merged[gene] += int(count)
+    return dict(merged)
+
+
+def load_pass1_umi_counts(connection, barcode, ftype):
+    """Merge one barcode/type's per-gene UMI counts from disk."""
+    merged = defaultdict(Counter)
+    for (payload,) in _load_payloads(connection, "umi", ftype, barcode):
+        for gene, umis in pickle.loads(payload).items():
+            merged[gene].update(umis)
+    return {gene: Counter(umis) for gene, umis in merged.items()}
+
+
+def load_pass1_global_counts(connection, barcode):
+    """Merge one barcode's global UMI counts from disk."""
+    merged = Counter()
+    for (payload,) in _load_payloads(connection, "global", "global", barcode):
+        merged.update(pickle.loads(payload))
+    return merged
+
 
 def resolve_worker_count(requested, task_count, performance_opts=None):
     """Resolve a bounded worker count for DGE passes.

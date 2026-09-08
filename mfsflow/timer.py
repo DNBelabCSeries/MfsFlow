@@ -26,10 +26,10 @@ def format_duration(seconds):
     return f"{int(hours)}h{int(minutes):02d}m{sec:05.2f}s"
 
 
-def resource_usage_details():
-    """Return process and waited-child CPU/RSS metrics for timing logs."""
+def resource_usage_snapshot():
+    """Capture cumulative usage counters used to calculate stage deltas."""
     if resource is None:
-        return ""
+        return None
     self_usage = resource.getrusage(resource.RUSAGE_SELF)
     child_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     if sys.platform == "darwin":
@@ -38,13 +38,50 @@ def resource_usage_details():
     else:
         self_rss = self_usage.ru_maxrss / 1024
         child_rss = child_usage.ru_maxrss / 1024
-    peak_rss_mb = max(self_rss, child_rss)
-    cpu_user_sec = self_usage.ru_utime + child_usage.ru_utime
-    cpu_sys_sec = self_usage.ru_stime + child_usage.ru_stime
+    return {
+        "self_user": self_usage.ru_utime,
+        "self_sys": self_usage.ru_stime,
+        "child_user": child_usage.ru_utime,
+        "child_sys": child_usage.ru_stime,
+        "self_rss": self_rss,
+        "child_rss": child_rss,
+    }
+
+
+def resource_usage_details(baseline=None):
+    """Return stage CPU deltas and process/child RSS high-water metrics.
+
+    ``getrusage`` exposes a lifetime high-water RSS value rather than a
+    per-stage peak.  Keep that limitation explicit in the field name while
+    reporting CPU as a delta when a baseline is supplied.
+    """
+    current = resource_usage_snapshot()
+    if current is None:
+        return ""
+    baseline = baseline or {
+        "self_user": 0.0,
+        "self_sys": 0.0,
+        "child_user": 0.0,
+        "child_sys": 0.0,
+    }
+    peak_rss_mb = max(current["self_rss"], current["child_rss"])
+    cpu_user_sec = max(
+        0.0,
+        (current["self_user"] - baseline.get("self_user", 0.0))
+        + (current["child_user"] - baseline.get("child_user", 0.0)),
+    )
+    cpu_sys_sec = max(
+        0.0,
+        (current["self_sys"] - baseline.get("self_sys", 0.0))
+        + (current["child_sys"] - baseline.get("child_sys", 0.0)),
+    )
     return (
+        # Keep the historical key for consumers of pipeline_timing.tsv; the
+        # explicit scope below documents that it is not a per-stage sample.
         f"rss_peak_mb={peak_rss_mb:.1f};"
         f"cpu_user_sec={cpu_user_sec:.2f};"
-        f"cpu_sys_sec={cpu_sys_sec:.2f}"
+        f"cpu_sys_sec={cpu_sys_sec:.2f};"
+        f"rss_scope=process_lifetime_highwater"
     )
 
 
@@ -74,16 +111,17 @@ class PipelineTimer:
     @contextmanager
     def section(self, stage, details=""):
         start = time.perf_counter()
+        usage_start = resource_usage_snapshot()
         try:
             yield
         except Exception:
             duration = time.perf_counter() - start
-            extra = resource_usage_details()
+            extra = resource_usage_details(usage_start)
             self.record(stage, "failed", duration, ";".join(filter(None, (details, extra))))
             log_error(f"Failed {stage} (Duration: {format_duration(duration)})")
             raise
         else:
             duration = time.perf_counter() - start
-            extra = resource_usage_details()
+            extra = resource_usage_details(usage_start)
             self.record(stage, "ok", duration, ";".join(filter(None, (details, extra))))
             log_info(f"Finished {stage} (Duration: {format_duration(duration)})")

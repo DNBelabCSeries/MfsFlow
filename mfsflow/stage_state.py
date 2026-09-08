@@ -125,10 +125,13 @@ def _read_matrix_dimensions(path):
     raise RuntimeError(f"Matrix Market dimensions are missing: {path}")
 
 
-def _validate_matrix_entries(path, rows, columns, declared_entries):
+def _validate_matrix_entries(path, rows=None, columns=None, declared_entries=None):
     """Validate Matrix Market coordinate rows during full resume checks."""
     try:
         with gzip.open(path, "rt", encoding="utf-8") as handle:
+            header = handle.readline().strip()
+            if not header.startswith("%%MatrixMarket matrix coordinate"):
+                raise RuntimeError(f"invalid Matrix Market header: {path}")
             dimensions_seen = False
             actual_entries = 0
             for line_number, line in enumerate(handle, start=1):
@@ -136,10 +139,32 @@ def _validate_matrix_entries(path, rows, columns, declared_entries):
                 if not line or line.startswith("%"):
                     continue
                 if not dimensions_seen:
+                    fields = line.split()
+                    if len(fields) != 3:
+                        raise RuntimeError(f"invalid Matrix Market dimensions: {path}")
+                    try:
+                        actual_rows, actual_columns, actual_entries_declared = (
+                            int(value) for value in fields
+                        )
+                    except ValueError as exc:
+                        raise RuntimeError(f"invalid Matrix Market dimensions: {path}") from exc
+                    if rows is not None and (
+                        actual_rows != rows
+                        or actual_columns != columns
+                        or actual_entries_declared != declared_entries
+                    ):
+                        raise RuntimeError(
+                            f"Matrix Market dimensions changed while validating: {path}"
+                        )
+                    rows, columns, declared_entries = (
+                        actual_rows,
+                        actual_columns,
+                        actual_entries_declared,
+                    )
                     dimensions_seen = True
                     continue
                 fields = line.split()
-                if len(fields) < 3:
+                if len(fields) != 3:
                     raise RuntimeError(
                         f"invalid Matrix Market entry at line {line_number}: {path}"
                     )
@@ -149,9 +174,19 @@ def _validate_matrix_entries(path, rows, columns, declared_entries):
                     raise RuntimeError(
                         f"invalid Matrix Market index at line {line_number}: {path}"
                     ) from exc
+                try:
+                    value = int(fields[2])
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"invalid Matrix Market value at line {line_number}: {path}"
+                    ) from exc
                 if not (1 <= row <= rows and 1 <= column <= columns):
                     raise RuntimeError(
                         f"Matrix Market index out of range at line {line_number}: {path}"
+                    )
+                if value < 0:
+                    raise RuntimeError(
+                        f"negative Matrix Market value at line {line_number}: {path}"
                     )
                 actual_entries += 1
             if not dimensions_seen:
@@ -161,6 +196,7 @@ def _validate_matrix_entries(path, rows, columns, declared_entries):
                     f"Matrix Market nnz mismatch in {path}: header declares "
                     f"{declared_entries}, found {actual_entries} entries"
                 )
+            return rows, columns, declared_entries
     except RuntimeError:
         raise
     except (OSError, EOFError, gzip.BadGzipFile, UnicodeError) as exc:
@@ -180,16 +216,14 @@ def _validate_mex_bundle(directory, full_check=False):
             f"{directory}; missing or empty: {', '.join(missing)}"
         )
 
-    for path, label in (
-        (matrix, "Expression matrix"),
-        (features, "Expression features"),
-        (barcodes, "Expression barcodes"),
-    ):
-        _validate_gzip(path, label, full_check=full_check)
-
-    rows, columns, declared_entries = _read_matrix_dimensions(matrix)
     if full_check:
-        _validate_matrix_entries(matrix, rows, columns, declared_entries)
+        # The full matrix pass validates gzip integrity, dimensions, indexes,
+        # values, and nnz in one stream instead of decompressing matrix.mtx.gz
+        # separately for each check.
+        rows, columns, declared_entries = _validate_matrix_entries(matrix)
+    else:
+        _validate_gzip(matrix, "Expression matrix", full_check=False)
+        rows, columns, declared_entries = _read_matrix_dimensions(matrix)
     feature_count = _count_nonempty_gzip_lines(features, "Expression features")
     barcode_count = _count_nonempty_gzip_lines(barcodes, "Expression barcodes")
     if rows != feature_count or columns != barcode_count:
@@ -236,14 +270,102 @@ def _validate_expression_bundles(runtime, full_check=False):
 
 
 def _validate_h5ad(path):
-    """Check the HDF5 signature without importing optional h5py."""
+    """Validate the HDF5 container and the minimum AnnData structure."""
     try:
         with open(path, "rb") as handle:
             signature = handle.read(8)
+            file_size = os.fstat(handle.fileno()).st_size
     except OSError as exc:
         raise RuntimeError(f"H5AD output is unreadable: {path}: {exc}") from exc
-    if signature != b"\x89HDF\r\n\x1a\n":
+    if signature != b"\x89HDF\r\n\x1a\n" or file_size <= 8:
         raise RuntimeError(f"H5AD output is not a valid HDF5 file: {path}")
+
+    try:
+        import h5py
+    except ImportError:
+        # The project runtime declares h5py, but keep the lightweight package
+        # and resume tests usable in dependency-free environments. The
+        # production path below performs structural validation when h5py is
+        # available; this fallback still rejects empty/signature-only files.
+        return
+
+    def axis_length(group, axis_name):
+        index_name = group.attrs.get("_index")
+        if isinstance(index_name, bytes):
+            index_name = index_name.decode("utf-8")
+        index_name = str(index_name or "_index")
+        if index_name not in group:
+            raise RuntimeError(f"H5AD {axis_name} index is missing: {path}")
+        dataset = group[index_name]
+        if len(dataset.shape) != 1:
+            raise RuntimeError(f"H5AD {axis_name} index is not one-dimensional: {path}")
+        return dataset.shape[0]
+
+    try:
+        with h5py.File(path, "r") as handle:
+            missing = [name for name in ("X", "obs", "var") if name not in handle]
+            if missing:
+                raise RuntimeError(
+                    f"H5AD is missing required structure ({', '.join(missing)}): {path}"
+                )
+            if not isinstance(handle["obs"], h5py.Group) or not isinstance(handle["var"], h5py.Group):
+                raise RuntimeError(f"H5AD obs/var are not groups: {path}")
+
+            x = handle["X"]
+            if isinstance(x, h5py.Dataset):
+                shape = tuple(x.shape)
+            else:
+                raw_shape = x.attrs.get("shape")
+                if raw_shape is None:
+                    raise RuntimeError(f"H5AD X matrix shape is missing: {path}")
+                shape = tuple(int(value) for value in raw_shape)
+                for name in ("data", "indices", "indptr"):
+                    if name not in x:
+                        raise RuntimeError(f"H5AD sparse X is missing {name}: {path}")
+
+            if len(shape) != 2 or any(int(value) < 0 for value in shape):
+                raise RuntimeError(f"H5AD X matrix shape is invalid: {path}")
+            obs_count = axis_length(handle["obs"], "obs")
+            var_count = axis_length(handle["var"], "var")
+            if shape != (obs_count, var_count):
+                raise RuntimeError(
+                    f"H5AD X dimensions do not match obs/var: {path} "
+                    f"({shape[0]} x {shape[1]} vs {obs_count} x {var_count})"
+                )
+    except RuntimeError:
+        raise
+    except (OSError, EOFError, ValueError, KeyError) as exc:
+        raise RuntimeError(f"H5AD output is not a valid HDF5 file: {path}: {exc}") from exc
+
+
+def _required_counting_bams(runtime):
+    """Return requested Counting BAM outputs and their required indexes."""
+    project = runtime.project
+    out_dir = runtime.out_dir
+    config = runtime.config
+    make_sorted = _config_bool(config.get("make_sorted_bam", False), default=False)
+    make_ub = _config_bool(config.get("make_ub_bam", False), default=False)
+    if make_sorted:
+        bam = os.path.join(
+            out_dir,
+            f"{project}.filtered.Aligned.GeneTagged.UBcorrected.sorted.bam",
+        )
+        return [(bam, bam + ".bai")]
+    if make_ub:
+        bam = os.path.join(
+            out_dir,
+            f"{project}.filtered.Aligned.GeneTagged.UBcorrected.bam",
+        )
+        return [(bam, None)]
+    return []
+
+
+def _validate_required_counting_bams(runtime):
+    for bam, index in _required_counting_bams(runtime):
+        if not _nonempty_file(bam):
+            raise RuntimeError(f"Counting is missing requested BAM output: {bam}")
+        if index is not None and not _nonempty_file(index):
+            raise RuntimeError(f"Counting is missing requested BAM index: {index}")
 
 
 def _validate_required_h5ad(runtime):
@@ -380,6 +502,7 @@ def _validate_stage_outputs(runtime, stage, artifacts):
             raise RuntimeError(f"Counting completed but required expression matrix is missing or empty: {matrix}")
         _validate_expression_bundles(runtime, full_check=False)
         _validate_required_h5ad(runtime)
+        _validate_required_counting_bams(runtime)
     elif stage == SUMMARISING and _config_bool(runtime.config.get("make_stats", True), default=True):
         table = os.path.join(stats_dir(out_dir), f"{project}.stats.tsv")
         if not _nonempty_file(table):
@@ -491,10 +614,7 @@ def validate_stage_manifest(runtime, stage):
     elif stage == COUNTING:
         _validate_expression_bundles(runtime, full_check=True)
         _validate_required_h5ad(runtime)
-        for artifact in artifacts:
-            path = artifact.get("path", "")
-            if path.endswith(".h5ad"):
-                _validate_h5ad(path)
+        _validate_required_counting_bams(runtime)
     return payload
 
 
@@ -555,3 +675,4 @@ def validate_resume_inputs(runtime):
             _validate_gzip(required, "Counting expression matrix", full_check=True)
         _validate_expression_bundles(runtime, full_check=True)
         _validate_required_h5ad(runtime)
+        _validate_required_counting_bams(runtime)

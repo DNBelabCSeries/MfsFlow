@@ -24,6 +24,19 @@ class UmiUtilsTests(unittest.TestCase):
             {"AAAA": "AAAA", "AAAT": "AAAA", "AATT": "AAAA", "TTTT": "TTTT"},
         )
 
+    def test_threshold_three_is_consistent_across_dispatch_boundary(self):
+        parent = "AAAAAAAAAA"
+        child = "TTTAAAAAAA"
+        small = {parent: 10, child: 1}
+
+        large = dict(small)
+        for index in range(98):
+            suffix = format(index, "04b")
+            large["CCCCCC" + suffix] = 1
+
+        self.assertEqual(cluster_umis(small, threshold=3)[child], parent)
+        self.assertEqual(cluster_umis(large, threshold=3)[child], parent)
+
 
 if __name__ == "__main__":
     unittest.main()

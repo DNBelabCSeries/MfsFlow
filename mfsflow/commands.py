@@ -2,9 +2,10 @@
 
 import subprocess
 import time
+from collections import deque
 
 from mfsflow.logging_utils import log_error, log_info
-from mfsflow.timer import format_duration, resource_usage_details
+from mfsflow.timer import format_duration, resource_usage_details, resource_usage_snapshot
 
 
 def run_stage_cmd(cmd, stage_name, run_log, exec_env, timer, log_path, shell=False):
@@ -14,9 +15,10 @@ def run_stage_cmd(cmd, stage_name, run_log, exec_env, timer, log_path, shell=Fal
     else:
         cmd_str = str(cmd)
     start = time.perf_counter()
+    usage_start = resource_usage_snapshot()
     res = subprocess.run(cmd, stdout=run_log, stderr=subprocess.STDOUT, shell=shell, env=exec_env)
     duration = time.perf_counter() - start
-    resource_details = resource_usage_details()
+    resource_details = resource_usage_details(usage_start)
     if res.returncode != 0:
         timer.record(
             stage_name,
@@ -28,7 +30,7 @@ def run_stage_cmd(cmd, stage_name, run_log, exec_env, timer, log_path, shell=Fal
         run_log.flush()
         try:
             with open(log_path, "r") as lr:
-                tail = "".join(lr.readlines()[-30:])
+                tail = "".join(deque(lr, maxlen=30))
                 log_error(f"{stage_name} failed (rc={res.returncode}). Last 30 lines of log ({log_path}):\n{tail}")
         except Exception:
             pass
