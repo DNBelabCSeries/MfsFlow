@@ -39,6 +39,11 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q mfsflow tests
 
+      - name: Install native runtime for bundled tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgomp1
+
       - name: Check patch formatting
         run: git diff --check
 
