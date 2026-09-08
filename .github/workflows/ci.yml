@@ -59,6 +59,7 @@ jobs:
           mfsflow/software/STAR --version
           mfsflow/software/featureCounts -v
           mfsflow/software/pigz --version
+          printf 'MfsFlow pigz runtime smoke test\n' | mfsflow/software/pigz -c >/dev/null
           mfsflow/software/samtools --version
           mfsflow/software/seqkit version
 
