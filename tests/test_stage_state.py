@@ -184,6 +184,26 @@ class StageStateTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "dimensions do not match"):
                 record_stage_success(runtime, COUNTING)
 
+    def test_counting_rejects_cross_bundle_dimension_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = self.make_runtime(tmpdir)
+            self.write_mex_bundle(tmpdir)
+            second_matrix = os.path.join(
+                expression_dir(tmpdir), "sample.exon.read", "matrix.mtx.gz"
+            )
+            with gzip.open(second_matrix, "wt") as handle:
+                handle.write("%%MatrixMarket matrix coordinate integer general\n")
+                handle.write("%\n3 2 1\n1 1 1\n")
+            second_features = os.path.join(
+                expression_dir(tmpdir), "sample.exon.read", "features.tsv.gz"
+            )
+            with gzip.open(second_features, "wt") as handle:
+                for index in range(3):
+                    handle.write(f"gene{index}\tGene {index}\tGene Expression\n")
+
+            with self.assertRaisesRegex(RuntimeError, "do not share dimensions"):
+                record_stage_success(runtime, COUNTING)
+
     def test_counting_rejects_invalid_h5ad(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime = self.make_runtime(tmpdir)

@@ -47,51 +47,48 @@ def open_pass1_store(out_dir, project, tmp_root=None):
 
 def store_pass1_result(connection, partial_read, partial_umi, partial_global):
     """Persist one count-worker result and release it from the caller."""
-    rows = []
-
-    for ftype in ("exon", "intron"):
-        for barcode, genes in partial_read.get(ftype, {}).items():
-            if genes:
-                rows.append(
-                    (
+    def iter_rows():
+        # Yield rows directly to sqlite instead of materialising every
+        # serialized payload in a second Python list.  The worker result is
+        # already the memory owner; this avoids another large transient copy.
+        for ftype in ("exon", "intron"):
+            for barcode, genes in partial_read.get(ftype, {}).items():
+                if genes:
+                    payload = dict(genes)
+                    yield (
                         "read",
                         ftype,
                         str(barcode),
-                        sum(int(count) for count in genes.values()),
-                        sqlite3.Binary(pickle.dumps(dict(genes), protocol=pickle.HIGHEST_PROTOCOL)),
+                        sum(int(count) for count in payload.values()),
+                        sqlite3.Binary(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)),
                     )
-                )
-        for barcode, genes in partial_umi.get(ftype, {}).items():
-            if genes:
-                payload = {gene: dict(umis) for gene, umis in genes.items()}
-                rows.append(
-                    (
+            for barcode, genes in partial_umi.get(ftype, {}).items():
+                if genes:
+                    payload = {gene: dict(umis) for gene, umis in genes.items()}
+                    yield (
                         "umi",
                         ftype,
                         str(barcode),
                         sum(len(umis) for umis in payload.values()),
                         sqlite3.Binary(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)),
                     )
-                )
 
-    for barcode, umis in (partial_global or {}).items():
-        if umis:
-            rows.append(
-                (
+        for barcode, umis in (partial_global or {}).items():
+            if umis:
+                payload = dict(umis)
+                yield (
                     "global",
                     "global",
                     str(barcode),
-                    len(umis),
-                    sqlite3.Binary(pickle.dumps(dict(umis), protocol=pickle.HIGHEST_PROTOCOL)),
+                    len(payload),
+                    sqlite3.Binary(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)),
                 )
-            )
 
-    if rows:
-        connection.executemany(
-            "INSERT INTO pass1_chunks(kind, ftype, barcode, weight, payload) "
-            "VALUES (?, ?, ?, ?, ?)",
-            rows,
-        )
+    connection.executemany(
+        "INSERT INTO pass1_chunks(kind, ftype, barcode, weight, payload) "
+        "VALUES (?, ?, ?, ?, ?)",
+        iter_rows(),
+    )
     connection.commit()
 
 

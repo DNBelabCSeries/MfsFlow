@@ -9,6 +9,7 @@ for downstream analysis with Scanpy and other tools.
 import gzip
 import json
 import os
+import tempfile
 
 try:
     from mfsflow.path_layout import expression_dir
@@ -91,7 +92,16 @@ def export_h5ad(out_dir, project, config=None, main_matrix="inex.umi"):
         adata.uns["pipeline_config"] = _json_safe(config)
 
     out_path = os.path.join(expression_output_dir, f"{project}.h5ad")
-    adata.write_h5ad(out_path, compression="gzip")
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=f".{project}.", suffix=".h5ad.tmp", dir=expression_output_dir
+    )
+    os.close(fd)
+    try:
+        adata.write_h5ad(temporary_path, compression="gzip")
+        os.replace(temporary_path, out_path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
     return out_path
 
 

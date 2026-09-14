@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import gzip
 import hashlib
+import zlib
 from datetime import datetime
 from pathlib import Path
 
@@ -88,7 +89,7 @@ def _validate_gzip(path, label, full_check=True):
                 # Small file: read the whole stream to catch mid-stream corruption.
                 while handle.read(1024 * 1024):
                     pass
-    except (OSError, EOFError, gzip.BadGzipFile) as exc:
+    except (OSError, EOFError, gzip.BadGzipFile, zlib.error) as exc:
         raise RuntimeError(f"{label} is corrupt or unreadable: {path}: {exc}") from exc
 
 
@@ -96,7 +97,7 @@ def _count_nonempty_gzip_lines(path, label):
     try:
         with gzip.open(path, "rt", encoding="utf-8") as handle:
             return sum(1 for line in handle if line.strip())
-    except (OSError, EOFError, gzip.BadGzipFile, UnicodeError) as exc:
+    except (OSError, EOFError, gzip.BadGzipFile, UnicodeError, zlib.error) as exc:
         raise RuntimeError(f"{label} is corrupt or unreadable: {path}: {exc}") from exc
 
 
@@ -120,7 +121,7 @@ def _read_matrix_dimensions(path):
                 return rows, columns, entries
     except RuntimeError:
         raise
-    except (OSError, EOFError, gzip.BadGzipFile, UnicodeError, ValueError) as exc:
+    except (OSError, EOFError, gzip.BadGzipFile, UnicodeError, ValueError, zlib.error) as exc:
         raise RuntimeError(f"invalid Matrix Market file: {path}: {exc}") from exc
     raise RuntimeError(f"Matrix Market dimensions are missing: {path}")
 
@@ -199,7 +200,7 @@ def _validate_matrix_entries(path, rows=None, columns=None, declared_entries=Non
             return rows, columns, declared_entries
     except RuntimeError:
         raise
-    except (OSError, EOFError, gzip.BadGzipFile, UnicodeError) as exc:
+    except (OSError, EOFError, gzip.BadGzipFile, UnicodeError, zlib.error) as exc:
         raise RuntimeError(f"Expression matrix is corrupt or unreadable: {path}: {exc}") from exc
 
 
@@ -232,6 +233,7 @@ def _validate_mex_bundle(directory, full_check=False):
             f"{directory} declares {rows} x {columns}, "
             f"but has {feature_count} features and {barcode_count} barcodes."
         )
+    return rows, columns
 
 
 def _validate_expression_bundles(runtime, full_check=False):
@@ -265,8 +267,17 @@ def _validate_expression_bundles(runtime, full_check=False):
         raise RuntimeError(
             f"Counting completed but no expression matrix bundle was found under: {root}"
         )
+    reference_shape = None
     for directory in sorted(set(bundle_dirs) | set(required_dirs)):
-        _validate_mex_bundle(directory, full_check=full_check)
+        shape = _validate_mex_bundle(directory, full_check=full_check)
+        if reference_shape is None:
+            reference_shape = shape
+        elif shape != reference_shape:
+            raise RuntimeError(
+                "Expression matrix bundles do not share dimensions: "
+                f"{directory} has {shape[0]} x {shape[1]}, "
+                f"expected {reference_shape[0]} x {reference_shape[1]}"
+            )
 
 
 def _validate_h5ad(path):

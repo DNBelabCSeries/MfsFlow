@@ -365,6 +365,7 @@ counting_opts:
 | `performance_opts.tool_cache` | string | null | Writable cache for bundled tools when the installed package is read-only |
 | `performance_opts.min_free_gb` | number | 5 | Minimum free disk space required before execution |
 | `performance_opts.disk_space_multiplier` | number | 4.0 | Estimated workspace requirement relative to FASTQ size |
+| `performance_opts.max_dge_workers` | int | null | Optional upper bound for DGE counting/UMI-clustering worker processes; useful when thread count exceeds available RAM |
 | `performance_opts.mapping_timeout_sec` | number | null | Optional timeout for each corrector-to-STAR mapping stream; null disables it |
 | `num_threads` | int | 30 | Number of threads to use |
 
@@ -378,6 +379,7 @@ performance_opts:
   stream_bc_correction: true
   tmp_root: null          # or "/dev/shm"
   tool_cache: null        # or "/path/to/writable/mfsflow-tool-cache"
+  max_dge_workers: null   # or a positive integer such as 8
   mapping_timeout_sec: null # Optional timeout per mapping stream
 num_threads: 30
 ```

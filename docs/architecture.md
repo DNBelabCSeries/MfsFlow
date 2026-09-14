@@ -1,8 +1,11 @@
 # MfsFlow Architecture
 
-MfsFlow is a package-oriented pipeline. All code lives in the `mfsflow/`
-package. After `pip install .`, the package is self-contained and requires
-no external script directories.
+MfsFlow is a package-oriented pipeline. The production workflow lives in the
+`mfsflow/` package. After `pip install .`, the Python package is self-contained
+and requires no external script directories. The repository also contains an
+optional standalone Rust stitcher under `crates/mfs-stitcher/`; it is checked
+by CI but is not selected automatically by the Python pipeline until numerical
+parity and benchmark validation are complete.
 
 ## Entry Points
 
@@ -17,18 +20,18 @@ mfsflow/
 ├── cli.py                  # CLI entry point
 ├── runtime.py              # Runtime context, path derivation, timing
 ├── bootstrap.py            # Pre-run setup, barcode table creation
-├── pipeline_config.py      # YAML config building and barcode resolution
-├── run_config.py          # Run configuration writer
 ├── path_layout.py         # Output directory layout constants
-├── constant.py            # Shared constants
 ├── report.py              # HTML report generation
-├── config/                # Input validation and typed configuration models
+├── config/                # Configuration building, validation, serialization
 ├── pipeline/              # Stage orchestration
 ├── stages/                # Stage implementations (filtering, mapping, counting, statistics)
 ├── scripts/               # Executable stage tools (fqfilter, mapping_analysis, etc.)
 ├── software/              # Bundled bioinformatics tools (STAR, samtools, etc.)
 ├── yaml/                  # Example config and barcode list YAML files
 └── report_assets/         # HTML report templates and Plotly.js
+
+crates/
+└── mfs-stitcher/          # Optional Rust accelerator and isoform caller
 ```
 
 ## Key Modules

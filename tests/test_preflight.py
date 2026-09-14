@@ -1,4 +1,6 @@
+import gzip
 import os
+import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -9,12 +11,109 @@ from mfsflow.preflight import (
     check_external_tools,
     check_python_dependencies,
     check_reference_integrity,
+    run_preflight,
 )
 from mfsflow.stage_state import validate_resume_inputs
 from mfsflow.stages import COUNTING, FILTERING, MAPPING, SUMMARISING
 
 
 class PreflightTests(unittest.TestCase):
+    def test_pigz_compatibility_fallback_supports_current_commands(self):
+        compatibility = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "mfsflow",
+            "scripts",
+            "pigz_compat.py",
+        )
+        payload = b"MfsFlow fallback compression test\n"
+        compressed = subprocess.check_output(
+            [compatibility, "-p", "2", "-c"],
+            input=payload,
+        )
+        self.assertEqual(gzip.decompress(compressed), payload)
+
+        with tempfile.NamedTemporaryFile(suffix=".gz") as handle:
+            handle.write(compressed)
+            handle.flush()
+            decompressed = subprocess.check_output(
+                [compatibility, "-p", "2", "-dc", handle.name]
+            )
+        self.assertEqual(decompressed, payload)
+
+        compressed = subprocess.check_output(
+            [compatibility, "--processes=2", "--stdout"],
+            input=payload,
+        )
+        self.assertEqual(gzip.decompress(compressed), payload)
+
+    def test_unusable_pigz_switches_to_compatibility_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = {
+                name: os.path.join(tmpdir, name)
+                for name in ("samtools", "pigz", "STAR", "featureCounts")
+            }
+            for name, path in paths.items():
+                with open(path, "w") as handle:
+                    handle.write("#!/bin/sh\n")
+                    if name == "pigz":
+                        handle.write("if [ \"$1\" = \"--version\" ]; then exit 0; fi\n")
+                        handle.write("echo 'zlib version less than 1.2.3' >&2\nexit 22\n")
+                os.chmod(path, 0o755)
+
+            config = {
+                "which_Stage": FILTERING,
+                "samtools_exec": paths["samtools"],
+                "pigz_exec": paths["pigz"],
+                "STAR_exec": paths["STAR"],
+                "featureCounts_exec": paths["featureCounts"],
+            }
+            with mock.patch("mfsflow.preflight.shutil.which", return_value=None):
+                check_external_tools(config)
+
+            self.assertTrue(config["pigz_exec"].endswith("pigz_compat.py"))
+
+    def test_missing_pigz_uses_compatibility_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = {}
+            for name in ("samtools", "STAR", "featureCounts"):
+                path = os.path.join(tmpdir, name)
+                with open(path, "w") as handle:
+                    handle.write("#!/bin/sh\n")
+                os.chmod(path, 0o755)
+                paths[name] = path
+            config = {
+                "which_Stage": FILTERING,
+                "samtools_exec": paths["samtools"],
+                "pigz_exec": os.path.join(tmpdir, "missing-pigz"),
+                "STAR_exec": paths["STAR"],
+                "featureCounts_exec": paths["featureCounts"],
+            }
+            with mock.patch("mfsflow.preflight.shutil.which", return_value=None):
+                check_external_tools(config)
+            self.assertTrue(config["pigz_exec"].endswith("pigz_compat.py"))
+
+    def test_unusable_seqkit_switches_to_gnu_split_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = {}
+            for name in ("samtools", "pigz", "seqkit", "STAR", "featureCounts"):
+                path = os.path.join(tmpdir, name)
+                with open(path, "w") as handle:
+                    handle.write("#!/bin/sh\n")
+                    if name == "seqkit":
+                        handle.write("exit 127\n")
+                os.chmod(path, 0o755)
+                paths[name] = path
+            config = {
+                "which_Stage": FILTERING,
+                "samtools_exec": paths["samtools"],
+                "pigz_exec": paths["pigz"],
+                "seqkit_exec": paths["seqkit"],
+                "STAR_exec": paths["STAR"],
+                "featureCounts_exec": paths["featureCounts"],
+            }
+            check_external_tools(config)
+            self.assertEqual(config["seqkit_exec"], "")
+
     def test_missing_python_dependency_reports_install_command(self):
         with mock.patch("mfsflow.preflight.importlib.util.find_spec", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "pip install -r requirements.txt"):
@@ -92,6 +191,30 @@ class PreflightTests(unittest.TestCase):
                     "which_Stage": MAPPING,
                     "reference": {"STAR_index": tmpdir, "GTF_file": gtf},
                 })
+
+    def test_preflight_syncs_resolved_tool_paths_to_runtime(self):
+        runtime = SimpleNamespace(
+            tools=SimpleNamespace(samtools="old-samtools", pigz="old-pigz", seqkit="old-seqkit")
+        )
+        config = {
+            "samtools_exec": "new-samtools",
+            "pigz_exec": "new-pigz",
+            "seqkit_exec": "new-seqkit",
+        }
+        with mock.patch("mfsflow.preflight.check_python_dependencies"), \
+             mock.patch("mfsflow.preflight.check_external_tools", side_effect=lambda value: value.update({
+                 "samtools_exec": "new-samtools",
+                 "pigz_exec": "new-pigz",
+                 "seqkit_exec": "new-seqkit",
+             })), \
+             mock.patch("mfsflow.preflight.check_reference_integrity"), \
+             mock.patch("mfsflow.preflight.check_disk_space"), \
+             mock.patch("mfsflow.preflight.validate_resume_inputs"):
+            run_preflight(config, runtime)
+
+        self.assertEqual(runtime.tools.samtools, "new-samtools")
+        self.assertEqual(runtime.tools.pigz, "new-pigz")
+        self.assertEqual(runtime.tools.seqkit, "new-seqkit")
 
     def test_disk_check_can_use_configured_zero_minimum(self):
         with tempfile.TemporaryDirectory() as tmpdir:

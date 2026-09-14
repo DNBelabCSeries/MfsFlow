@@ -17,6 +17,7 @@ import collections
 import gzip
 import glob
 import hashlib
+import tempfile
 from functools import lru_cache
 
 try:
@@ -44,6 +45,18 @@ def check_dependencies(samtools_exec, featurecounts_exec):
 
     check_one(samtools_exec, "samtools")
     check_one(featurecounts_exec, "featureCounts")
+
+
+def _temporary_output_path(path, suffix=".tmp"):
+    """Create a unique sibling path and close its descriptor immediately."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=suffix, dir=directory
+    )
+    os.close(fd)
+    os.unlink(temporary)
+    return temporary
 
 def get_bam_chromosomes(bam_file, samtools_exec='samtools'):
     """Reads chromosome names from BAM header."""
@@ -1186,8 +1199,6 @@ def process_bam_and_calculate_stats(
 
     except ImportError:
         print("pysam not found. Falling back to samtools pipe method...")
-    except Exception as e:
-        print(f"pysam processing failed: {e}. Falling back to samtools pipe...")
 
     # Fallback to samtools pipe
     buf_size = 64 * 1024 * 1024
@@ -1558,83 +1569,90 @@ def main():
     except ImportError:
         pysam = None
 
-    if pysam is not None:
-        print(f"Writing final GeneTagged BAM directly: {final_bam}")
-        with pysam.AlignmentFile(fc_outputs[0][1], "rb", threads=int(num_threads)) as template_in:
-            with pysam.AlignmentFile(final_bam, "wb", template=template_in, threads=int(num_threads)) as final_out:
-                for source_label, fc_bam, fc_strand_mode in fc_outputs:
-                    # Summary-based estimate: may overcount supplementary alignments
-                    # (featureCounts --primary does not filter FLAG 0x800). Affects
-                    # coverage sampling depth, not bias direction. See docstring.
-                    mapped_for_cov = primary_mapped_for_coverage(fc_bam, samtools_exec, read_layout) if collect_coverage else 0
-                    cov_fraction = coverage_sampling_fraction(mapped_for_cov, gene_body_max_reads)
-                    print(
-                        f"Gene body coverage sampling ({source_label}): "
-                        f"mapped={mapped_for_cov}, fraction={cov_fraction:.6f}"
-                    )
-                    r_stats, cov, cov_reads = process_bam_and_calculate_stats(
-                        fc_bam, final_bam, samtools_exec, num_threads,
-                        gene_map, source_label=source_label, gene_models=gene_models,
-                        collect_coverage=collect_coverage, output_handle=final_out,
-                        intron_index=intron_index, intron_starts=intron_starts,
-                        strand_mode=fc_strand_mode,
-                        coverage_sample_fraction=cov_fraction,
-                        coverage_sample_seed=gene_body_sample_seed,
-                    )
-                    merge_stats(total_read_stats, r_stats)
-                    if source_label == "UMI":
-                        merge_coverage(total_cov_umi, cov)
-                        total_cov_umi_reads += cov_reads
-                        total_cov_umi_fraction = cov_fraction
-                    else:
-                        merge_coverage(total_cov_int, cov)
-                        total_cov_int_reads += cov_reads
-                        total_cov_int_fraction = cov_fraction
-                    os.remove(fc_bam)
-    else:
-        print("pysam unavailable for direct final BAM writing; falling back to intermediate BAM merge.")
-        bams_to_merge = []
-        for source_label, fc_bam, fc_strand_mode in fc_outputs:
-            processed_bam = fc_bam + ".processed.bam"
-            # Summary-based estimate: may overcount supplementary alignments
-            # (featureCounts --primary does not filter FLAG 0x800). Affects
-            # coverage sampling depth, not bias direction. See docstring.
-            mapped_for_cov = primary_mapped_for_coverage(fc_bam, samtools_exec, read_layout) if collect_coverage else 0
-            cov_fraction = coverage_sampling_fraction(mapped_for_cov, gene_body_max_reads)
-            print(
-                f"Gene body coverage sampling ({source_label}): "
-                f"mapped={mapped_for_cov}, fraction={cov_fraction:.6f}"
-            )
-            r_stats, cov, cov_reads = process_bam_and_calculate_stats(
-                fc_bam, processed_bam, samtools_exec, num_threads,
-                gene_map, source_label=source_label, gene_models=gene_models,
-                collect_coverage=collect_coverage,
-                intron_index=intron_index, intron_starts=intron_starts,
-                strand_mode=fc_strand_mode,
-                coverage_sample_fraction=cov_fraction,
-                coverage_sample_seed=gene_body_sample_seed,
-            )
-            merge_stats(total_read_stats, r_stats)
-            if source_label == "UMI":
-                merge_coverage(total_cov_umi, cov)
-                total_cov_umi_reads += cov_reads
-                total_cov_umi_fraction = cov_fraction
-            else:
-                merge_coverage(total_cov_int, cov)
-                total_cov_int_reads += cov_reads
-                total_cov_int_fraction = cov_fraction
-            os.remove(fc_bam)
-            bams_to_merge.append(processed_bam)
-
-        if len(bams_to_merge) == 1:
-            os.rename(bams_to_merge[0], final_bam)
+    staged_final_bam = _temporary_output_path(final_bam, suffix=".tmp.bam")
+    try:
+        if pysam is not None:
+            print(f"Writing final GeneTagged BAM directly: {staged_final_bam}")
+            with pysam.AlignmentFile(fc_outputs[0][1], "rb", threads=int(num_threads)) as template_in:
+                with pysam.AlignmentFile(staged_final_bam, "wb", template=template_in, threads=int(num_threads)) as final_out:
+                    for source_label, fc_bam, fc_strand_mode in fc_outputs:
+                        # Summary-based estimate: may overcount supplementary alignments
+                        # (featureCounts --primary does not filter FLAG 0x800). Affects
+                        # coverage sampling depth, not bias direction. See docstring.
+                        mapped_for_cov = primary_mapped_for_coverage(fc_bam, samtools_exec, read_layout) if collect_coverage else 0
+                        cov_fraction = coverage_sampling_fraction(mapped_for_cov, gene_body_max_reads)
+                        print(
+                            f"Gene body coverage sampling ({source_label}): "
+                            f"mapped={mapped_for_cov}, fraction={cov_fraction:.6f}"
+                        )
+                        r_stats, cov, cov_reads = process_bam_and_calculate_stats(
+                            fc_bam, staged_final_bam, samtools_exec, num_threads,
+                            gene_map, source_label=source_label, gene_models=gene_models,
+                            collect_coverage=collect_coverage, output_handle=final_out,
+                            intron_index=intron_index, intron_starts=intron_starts,
+                            strand_mode=fc_strand_mode,
+                            coverage_sample_fraction=cov_fraction,
+                            coverage_sample_seed=gene_body_sample_seed,
+                        )
+                        merge_stats(total_read_stats, r_stats)
+                        if source_label == "UMI":
+                            merge_coverage(total_cov_umi, cov)
+                            total_cov_umi_reads += cov_reads
+                            total_cov_umi_fraction = cov_fraction
+                        else:
+                            merge_coverage(total_cov_int, cov)
+                            total_cov_int_reads += cov_reads
+                            total_cov_int_fraction = cov_fraction
+                        os.remove(fc_bam)
         else:
-            print(f"Merging BAMs with {num_threads} threads...")
-            cmd = [samtools_exec, 'cat', '-@', str(num_threads), '-o', final_bam] + bams_to_merge
-            subprocess.check_call(cmd)
-            for b in bams_to_merge:
-                if os.path.exists(b):
-                    os.remove(b)
+            print("pysam unavailable for direct final BAM writing; falling back to intermediate BAM merge.")
+            bams_to_merge = []
+            for source_label, fc_bam, fc_strand_mode in fc_outputs:
+                processed_bam = fc_bam + ".processed.bam"
+                # Summary-based estimate: may overcount supplementary alignments
+                # (featureCounts --primary does not filter FLAG 0x800). Affects
+                # coverage sampling depth, not bias direction. See docstring.
+                mapped_for_cov = primary_mapped_for_coverage(fc_bam, samtools_exec, read_layout) if collect_coverage else 0
+                cov_fraction = coverage_sampling_fraction(mapped_for_cov, gene_body_max_reads)
+                print(
+                    f"Gene body coverage sampling ({source_label}): "
+                    f"mapped={mapped_for_cov}, fraction={cov_fraction:.6f}"
+                )
+                r_stats, cov, cov_reads = process_bam_and_calculate_stats(
+                    fc_bam, processed_bam, samtools_exec, num_threads,
+                    gene_map, source_label=source_label, gene_models=gene_models,
+                    collect_coverage=collect_coverage,
+                    intron_index=intron_index, intron_starts=intron_starts,
+                    strand_mode=fc_strand_mode,
+                    coverage_sample_fraction=cov_fraction,
+                    coverage_sample_seed=gene_body_sample_seed,
+                )
+                merge_stats(total_read_stats, r_stats)
+                if source_label == "UMI":
+                    merge_coverage(total_cov_umi, cov)
+                    total_cov_umi_reads += cov_reads
+                    total_cov_umi_fraction = cov_fraction
+                else:
+                    merge_coverage(total_cov_int, cov)
+                    total_cov_int_reads += cov_reads
+                    total_cov_int_fraction = cov_fraction
+                os.remove(fc_bam)
+                bams_to_merge.append(processed_bam)
+
+            if len(bams_to_merge) == 1:
+                os.replace(bams_to_merge[0], staged_final_bam)
+            else:
+                print(f"Merging BAMs with {num_threads} threads...")
+                cmd = [samtools_exec, 'cat', '-@', str(num_threads), '-o', staged_final_bam] + bams_to_merge
+                subprocess.check_call(cmd)
+                for b in bams_to_merge:
+                    if os.path.exists(b):
+                        os.remove(b)
+
+        os.replace(staged_final_bam, final_bam)
+    finally:
+        if os.path.exists(staged_final_bam):
+            os.remove(staged_final_bam)
 
     cleanup_featurecounts_intermediates([umi_bam, internal_bam])
 
@@ -1655,8 +1673,16 @@ def main():
         "coverage_sample_seed": gene_body_sample_seed,
         "coverage_target_reads": gene_body_max_reads
     }
-    with open(stats_out, 'w') as f:
-        json.dump(stats_data, f)
+    temporary_stats = _temporary_output_path(stats_out, suffix=".tmp.json")
+    try:
+        with open(temporary_stats, 'w', encoding='utf-8') as f:
+            json.dump(stats_data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_stats, stats_out)
+    finally:
+        if os.path.exists(temporary_stats):
+            os.remove(temporary_stats)
 
     print("FeatureCounts pipeline finished successfully.")
 

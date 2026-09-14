@@ -31,6 +31,11 @@ The pipeline automatically resolves these tools from the `software/` directory o
 On macOS, install compatible native versions of these tools separately and make
 them available on `PATH`.
 
+At startup MfsFlow runs a real compression probe for `pigz`, not only a version
+check. If the bundled binary cannot load the host's zlib, it falls back to a
+working system `pigz` or the packaged compatibility implementation. The latter
+is slower and is used only as a last resort.
+
 ### Python Dependencies
 Install via pip:
 ```bash
@@ -175,6 +180,18 @@ output_directory/
     ├── diagnostics/        # Logs, stage manifests, and barcode diagnostics
     └── run_manifest.json   # Successful export completion record
 ```
+
+### Final Deliverables (`outs/`)
+
+| Directory / File | Description | Downstream Usage |
+| :--- | :--- | :--- |
+| `expression/<project>.h5ad` | Standard AnnData object with counts (`exon`, `intron`, `inex` layers) and cell metadata | Scanpy (`sc.read_h5ad`), Seurat (via `anndata` / `SeuratDisk`) |
+| `expression/<project>.*.umi/` | 10x-compatible MEX sparse matrices (`matrix.mtx.gz`, `features.tsv.gz`, `barcodes.tsv.gz`) | Seurat (`Read10X`), Cell Ranger tools |
+| `bam/*.bam` & `*.bai` | Final coordinate-sorted, indexed BAM with `CB`, `UB`, `GX`, `GE`, `GI` tags | IGV visualization, isoform reconstruction, custom pileups |
+| `<project>_*_report.html` | Standalone interactive HTML report with plate layouts, QC metrics, and saturation curves | Browser inspection, project delivery |
+| `stats/` | TSV tables and charts covering Q30 scores, cell yield, mapping rates, and sequencing saturation | Downstream QC and meta-analysis |
+| `run_manifest.json` | Execution summary, artifact manifest, and MD5 checksums | Provenance and data integrity audits |
+
 
 MfsFlow supports resuming interrupted runs from intermediate stages. After a run
 finishes, final deliverables are exported into `outs/` while the working artifacts

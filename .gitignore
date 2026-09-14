@@ -1,6 +1,7 @@
 transfer_barcode
 report/create_summary
 stitcher/
+crates/mfs-stitcher/target/
 
 # Python
 __pycache__/

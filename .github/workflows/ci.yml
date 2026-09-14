@@ -58,8 +58,17 @@ jobs:
           test -x mfsflow/software/seqkit
           mfsflow/software/STAR --version
           mfsflow/software/featureCounts -v
-          mfsflow/software/pigz --version
-          printf 'MfsFlow pigz runtime smoke test\n' | mfsflow/software/pigz -c >/dev/null
+          pigz_ok=true
+          if ! mfsflow/software/pigz --version; then
+            pigz_ok=false
+          elif ! printf 'MfsFlow pigz runtime smoke test\n' | mfsflow/software/pigz -c >/dev/null; then
+            pigz_ok=false
+          fi
+          if [ "$pigz_ok" = false ]; then
+            echo "Bundled pigz is incompatible with this runner; testing the supported fallback."
+            python mfsflow/scripts/pigz_compat.py --version
+            printf 'MfsFlow pigz fallback smoke test\n' | python mfsflow/scripts/pigz_compat.py -c >/dev/null
+          fi
           mfsflow/software/samtools --version
           mfsflow/software/seqkit version
 
@@ -90,3 +99,25 @@ jobs:
           cd /tmp
           PYTHONPATH="$GITHUB_WORKSPACE/wheel_check:$GITHUB_WORKSPACE" \
             python -m unittest tests.test_package_data -v
+
+  rust:
+    name: Rust stitcher checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path crates/mfs-stitcher/Cargo.toml -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --manifest-path crates/mfs-stitcher/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --locked --manifest-path crates/mfs-stitcher/Cargo.toml

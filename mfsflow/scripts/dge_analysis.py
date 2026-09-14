@@ -11,6 +11,7 @@ import sys
 import os
 import subprocess
 import gzip
+import tempfile
 from collections import defaultdict, Counter
 import multiprocessing
 import json
@@ -71,6 +72,27 @@ def _as_bool(value, default=False):
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
+
+
+def _write_json_atomic(path, payload):
+    """Write a JSON artifact through a sibling temporary file."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    os.close(fd)
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
 
 
 def process_barcode_worker(args):
@@ -256,18 +278,31 @@ def resolve_corrected_umi(read, correction_map, ham_dist):
 
 def write_corrected_bam_single_pass(input_bam, out_bam, correction_map, ham_dist, threads):
     write_threads = max(1, int(threads))
-    with pysam.AlignmentFile(input_bam, "rb", threads=max(1, write_threads // 2)) as infile:
-        with pysam.AlignmentFile(out_bam, "wb", template=infile, threads=write_threads) as outfile:
-            for read in infile.fetch(until_eof=True):
-                final_umi, keep_ub = resolve_corrected_umi(read, correction_map, ham_dist)
-                if final_umi is None:
+    output_dir = os.path.dirname(os.path.abspath(out_bam)) or "."
+    os.makedirs(output_dir, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(out_bam)}.",
+        suffix=".tmp.bam",
+        dir=output_dir,
+    )
+    os.close(fd)
+    try:
+        with pysam.AlignmentFile(input_bam, "rb", threads=max(1, write_threads // 2)) as infile:
+            with pysam.AlignmentFile(temporary_path, "wb", template=infile, threads=write_threads) as outfile:
+                for read in infile.fetch(until_eof=True):
+                    final_umi, keep_ub = resolve_corrected_umi(read, correction_map, ham_dist)
+                    if final_umi is None:
+                        outfile.write(read)
+                        continue
+                    if keep_ub:
+                        read.set_tag("UB", final_umi)
+                    else:
+                        read.set_tag("UB", None)
                     outfile.write(read)
-                    continue
-                if keep_ub:
-                    read.set_tag("UB", final_umi)
-                else:
-                    read.set_tag("UB", None)
-                outfile.write(read)
+        os.replace(temporary_path, out_bam)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
 
 def natural_sort_key(s):
     """
@@ -407,33 +442,60 @@ def write_sparse_matrix(counts_dict, gene_list, gene_names_map, barcode_list, ou
     # writing pass and should not be repeated unnecessarily.
     nnz = sum(count_entries())
 
-    matrix_file_gz = os.path.join(full_out_dir, "matrix.mtx.gz")
-    
-    # Manually write MatrixMarket format to gzip stream
-    # Header: %%MatrixMarket matrix coordinate integer general
-    # Size: Rows Cols Entries
-    with gzip.open(matrix_file_gz, 'wt') as f:
-        f.write("%%MatrixMarket matrix coordinate integer general\n")
-        f.write("%\n")
-        f.write(f"{len(gene_list)} {len(barcode_list)} {nnz}\n")
-        
-        lines = []
-        for row_idx, col_idx, count in iter_entries():
-            lines.append(f"{row_idx} {col_idx} {count}\n")
-            if len(lines) >= 100_000:
-                f.write("".join(lines))
-                lines.clear()
-        if lines:
-            f.write("".join(lines))
+    final_paths = {
+        "matrix": os.path.join(full_out_dir, "matrix.mtx.gz"),
+        "barcodes": os.path.join(full_out_dir, "barcodes.tsv.gz"),
+        "features": os.path.join(full_out_dir, "features.tsv.gz"),
+    }
+    temporary_paths = {}
 
-    with gzip.open(os.path.join(full_out_dir, "barcodes.tsv.gz"), "wt") as f:
-        for bc in barcode_list:
-            f.write(f"{bc}\n")
-            
-    with gzip.open(os.path.join(full_out_dir, "features.tsv.gz"), "wt") as f:
-        for g_id in gene_list:
-            g_name = gene_names_map.get(g_id, g_id)
-            f.write(f"{g_id}\t{g_name}\tGene Expression\n")
+    def make_temp_path(final_path):
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f".{os.path.basename(final_path)}.",
+            suffix=".tmp",
+            dir=full_out_dir,
+        )
+        os.close(fd)
+        return temp_path
+
+    try:
+        # Fill this mapping incrementally so a failure while creating a later
+        # temporary file still lets the finally block remove earlier files.
+        for key, final_path in final_paths.items():
+            temporary_paths[key] = make_temp_path(final_path)
+
+        # Write all three files completely before publishing any of them. This
+        # prevents an interrupted run from leaving a valid-looking partial MEX.
+        with gzip.open(temporary_paths["matrix"], "wt") as f:
+            f.write("%%MatrixMarket matrix coordinate integer general\n")
+            f.write("%\n")
+            f.write(f"{len(gene_list)} {len(barcode_list)} {nnz}\n")
+
+            lines = []
+            for row_idx, col_idx, count in iter_entries():
+                lines.append(f"{row_idx} {col_idx} {count}\n")
+                if len(lines) >= 100_000:
+                    f.write("".join(lines))
+                    lines.clear()
+            if lines:
+                f.write("".join(lines))
+
+        with gzip.open(temporary_paths["barcodes"], "wt") as f:
+            for bc in barcode_list:
+                f.write(f"{bc}\n")
+
+        with gzip.open(temporary_paths["features"], "wt") as f:
+            for g_id in gene_list:
+                g_name = gene_names_map.get(g_id, g_id)
+                f.write(f"{g_id}\t{g_name}\tGene Expression\n")
+
+        for key, final_path in final_paths.items():
+            os.replace(temporary_paths[key], final_path)
+            temporary_paths[key] = None
+    finally:
+        for temp_path in temporary_paths.values():
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
 
 def cluster_with_global(bc_args):
     """
@@ -581,26 +643,6 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
             'inex': defaultdict(lambda: defaultdict(int))
         }
         
-        final_read_counts = {
-            'exon': defaultdict(lambda: defaultdict(int)),
-            'intron': defaultdict(lambda: defaultdict(int)),
-            'inex': defaultdict(lambda: defaultdict(int))
-        }
-
-        # Rebuild read matrices one barcode at a time from the same store.
-        # Read counts are retained only in their final matrix-shaped maps.
-        for bc in pass1_barcodes(pass1_store_conn, "read"):
-            exon_counts = load_pass1_read_counts(pass1_store_conn, bc, "exon")
-            intron_counts = load_pass1_read_counts(pass1_store_conn, bc, "intron")
-            if exon_counts:
-                final_read_counts['exon'][bc].update(exon_counts)
-            if intron_counts:
-                final_read_counts['intron'][bc].update(intron_counts)
-            for gene, count in exon_counts.items():
-                final_read_counts['inex'][bc][gene] += count
-            for gene, count in intron_counts.items():
-                final_read_counts['inex'][bc][gene] += count
-
         # Calculate UMI Counts (with Clustering)
         umi_workloads = pass1_barcode_workloads(
             pass1_store_conn,
@@ -621,7 +663,7 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
         # Submit bounded batches so completed raw UMI maps can be released
         # before the next batch is queued. This keeps the parent-process peak
         # bounded without changing the per-barcode clustering result.
-        cluster_batch_size = max(8, min(256, cluster_workers * 8))
+        cluster_batch_size = max(8, min(64, cluster_workers * 4))
         processed_bcs = 0
         with multiprocessing.Pool(cluster_workers) as pool:
             for batch_start in range(0, total_bcs, cluster_batch_size):
@@ -665,13 +707,11 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
                 del batch_args
                 del batch_bcs
 
-        # The temporary store is no longer needed once all barcode results
-        # have been clustered and can be removed before matrix writing.
+        # Keep the store open until read matrices are rebuilt below.  Delaying
+        # that pass means the large read-count maps do not coexist with the
+        # UMI-clustering maps, which lowers the parent-process peak memory.
         del umi_workloads
         del cluster_barcodes
-        close_pass1_store(pass1_store_conn, pass1_store_path)
-        pass1_store_conn = None
-        pass1_store_path = None
 
         print("\nWriting Matrices...")
         
@@ -696,17 +736,42 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
                 os.makedirs(os.path.dirname(sat_file))
 
             print(f"Writing saturation distribution histograms to {os.path.dirname(sat_file)}...")
-            with open(sat_file, 'w') as f:
-                json.dump(dict(global_umi_freq), f)
-            with open(gene_sat_file, 'w') as f:
-                json.dump(dict(gene_umi_freq), f)
+            _write_json_atomic(sat_file, dict(global_umi_freq))
+            _write_json_atomic(gene_sat_file, dict(gene_umi_freq))
 
-        # Write Matrices
+        # Write UMI matrices first, then release their large maps before
+        # reconstructing read matrices from the disk-backed pass-1 store.
         write_sparse_matrix(final_umi_counts['exon'], gene_list, gene_names_ref, barcode_list, out_dir, f"{project}.exon.umi")
         if count_introns:
             write_sparse_matrix(final_umi_counts['intron'], gene_list, gene_names_ref, barcode_list, out_dir, f"{project}.intron.umi")
             write_sparse_matrix(final_umi_counts['inex'], gene_list, gene_names_ref, barcode_list, out_dir, f"{project}.inex.umi")
-            
+
+        umi_matrix_stats = summarize_exon_intron_counts(
+            final_umi_counts['exon'], final_umi_counts['intron']
+        )
+        del final_umi_counts
+
+        final_read_counts = {
+            'exon': defaultdict(lambda: defaultdict(int)),
+            'intron': defaultdict(lambda: defaultdict(int)),
+            'inex': defaultdict(lambda: defaultdict(int))
+        }
+
+        # Rebuild read matrices one barcode at a time from the same store.
+        # This pass is intentionally after UMI output so both matrix families
+        # are not resident in memory at the same time.
+        for bc in pass1_barcodes(pass1_store_conn, "read"):
+            exon_counts = load_pass1_read_counts(pass1_store_conn, bc, "exon")
+            intron_counts = load_pass1_read_counts(pass1_store_conn, bc, "intron")
+            if exon_counts:
+                final_read_counts['exon'][bc].update(exon_counts)
+            if intron_counts:
+                final_read_counts['intron'][bc].update(intron_counts)
+            for gene, count in exon_counts.items():
+                final_read_counts['inex'][bc][gene] += count
+            for gene, count in intron_counts.items():
+                final_read_counts['inex'][bc][gene] += count
+
         write_sparse_matrix(final_read_counts['exon'], gene_list, gene_names_ref, barcode_list, out_dir, f"{project}.exon.read")
         if count_introns:
             write_sparse_matrix(final_read_counts['intron'], gene_list, gene_names_ref, barcode_list, out_dir, f"{project}.intron.read")
@@ -715,19 +780,20 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
         cell_matrix_stats = {
             "schema_version": 1,
             "read_count_unit": "read_pairs" if str(config.get("read_layout", "PE")).upper() == "PE" else "reads",
-            "umi": summarize_exon_intron_counts(final_umi_counts['exon'], final_umi_counts['intron']),
+            "umi": umi_matrix_stats,
             "read": summarize_exon_intron_counts(final_read_counts['exon'], final_read_counts['intron']),
         }
         cell_stats_path = os.path.join(stats_dir(out_dir), f"{project}.cell_matrix_stats.json")
-        with open(cell_stats_path, "w", encoding="utf-8") as handle:
-            json.dump(cell_matrix_stats, handle, separators=(",", ":"))
+        _write_json_atomic(cell_stats_path, cell_matrix_stats)
         print(f"Cell matrix QC summary written: {cell_stats_path}")
 
         # Matrix files and the compact QC summary are now the durable outputs.
         # Release the large in-memory count maps before optional H5AD export,
         # which reads the matrices back into sparse structures.
-        del final_umi_counts
         del final_read_counts
+        close_pass1_store(pass1_store_conn, pass1_store_path)
+        pass1_store_conn = None
+        pass1_store_path = None
 
         if _as_bool(config.get('make_h5ad', True), default=True):
             print("Exporting combined H5AD...")
