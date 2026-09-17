@@ -48,7 +48,9 @@ def build_base_config(args, script_dir):
         config["sample"]["sample_id"] = args.plate
     elif args.expectBarcode:
         config["sample"]["sample_type"] = "custom"
-        config["sample"]["sample_id"] = "1"
+        # A custom table has arbitrary well IDs; there is no built-in plate
+        # or sample ID to report here.
+        config["sample"]["sample_id"] = None
         if not os.path.exists(args.expectBarcode):
             raise FileNotFoundError(f"Custom barcode file not found: {args.expectBarcode}")
         config["barcodes"]["barcode_file"] = os.path.abspath(args.expectBarcode)
@@ -107,6 +109,12 @@ def configure_reads(config, fastq_pairs, has_samplesheet):
         raise ValueError(f"R1 length ({len_r1}) must be > UMI length ({umi_len}).")
 
     if len_r2 == len_r1 + bc_len:
+        if has_samplesheet:
+            raise ValueError(
+                "--samplesheet is only supported when R1 and R2 have equal lengths. "
+                "This input already contains the barcode in the last 20 bases of R2; "
+                "remove --samplesheet."
+            )
         input_mode = "read_embedded_barcode"
     elif len_r2 == len_r1:
         if not has_samplesheet:

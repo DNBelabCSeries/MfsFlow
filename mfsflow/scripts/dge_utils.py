@@ -36,6 +36,13 @@ def open_pass1_store(out_dir, project, tmp_root=None):
         # the temporary directory. The pass is rebuilt on every run.
         connection.execute("PRAGMA journal_mode=OFF")
         connection.execute("PRAGMA synchronous=OFF")
+        # This database is private to one process and is deleted after the
+        # pass. Keep SQLite's small temporary structures in memory and use a
+        # bounded page cache so the spill store does not turn every barcode
+        # lookup into a filesystem round trip.
+        connection.execute("PRAGMA temp_store=MEMORY")
+        connection.execute("PRAGMA cache_size=-65536")
+        connection.execute("PRAGMA locking_mode=EXCLUSIVE")
         return connection, path
     except Exception:
         try:
@@ -45,8 +52,14 @@ def open_pass1_store(out_dir, project, tmp_root=None):
         raise
 
 
-def store_pass1_result(connection, partial_read, partial_umi, partial_global):
-    """Persist one count-worker result and release it from the caller."""
+def store_pass1_result(connection, partial_read, partial_umi, partial_global, commit=True):
+    """Persist one count-worker result and release it from the caller.
+
+    ``commit=False`` is used by the main DGE pass so a whole batch of worker
+    results is written in one transaction.  The default keeps the helper's
+    standalone behavior backward compatible for tests and callers that need
+    an immediately visible result.
+    """
     def iter_rows():
         # Yield rows directly to sqlite instead of materialising every
         # serialized payload in a second Python list.  The worker result is
@@ -89,7 +102,8 @@ def store_pass1_result(connection, partial_read, partial_umi, partial_global):
         "VALUES (?, ?, ?, ?, ?)",
         iter_rows(),
     )
-    connection.commit()
+    if commit:
+        connection.commit()
 
 
 def finalize_pass1_store(connection):
@@ -97,6 +111,10 @@ def finalize_pass1_store(connection):
     connection.execute(
         "CREATE INDEX pass1_chunks_lookup "
         "ON pass1_chunks(kind, ftype, barcode)"
+    )
+    connection.execute(
+        "CREATE INDEX pass1_chunks_barcode_lookup "
+        "ON pass1_chunks(barcode, kind, ftype)"
     )
     connection.commit()
 
@@ -147,6 +165,19 @@ def _load_payloads(connection, kind, ftype, barcode):
     )
 
 
+def _load_barcode_payloads(connection, barcode, kinds):
+    """Load all pass-1 payloads for one barcode with one indexed query."""
+    kinds = tuple(kinds)
+    if not kinds:
+        return ()
+    placeholders = ",".join("?" for _ in kinds)
+    return connection.execute(
+        "SELECT kind, ftype, payload FROM pass1_chunks "
+        f"WHERE barcode = ? AND kind IN ({placeholders})",
+        (barcode, *kinds),
+    )
+
+
 def load_pass1_read_counts(connection, barcode, ftype):
     """Merge one barcode/type's per-gene read counts from disk."""
     merged = defaultdict(int)
@@ -156,6 +187,20 @@ def load_pass1_read_counts(connection, barcode, ftype):
     return dict(merged)
 
 
+def load_pass1_read_bundle(connection, barcode):
+    """Load exon and intron read counts for one barcode in one query."""
+    merged = {
+        "exon": defaultdict(int),
+        "intron": defaultdict(int),
+    }
+    for kind, ftype, payload in _load_barcode_payloads(connection, barcode, ("read",)):
+        if kind != "read" or ftype not in merged:
+            continue
+        for gene, count in pickle.loads(payload).items():
+            merged[ftype][gene] += int(count)
+    return {ftype: dict(counts) for ftype, counts in merged.items()}
+
+
 def load_pass1_umi_counts(connection, barcode, ftype):
     """Merge one barcode/type's per-gene UMI counts from disk."""
     merged = defaultdict(Counter)
@@ -163,6 +208,27 @@ def load_pass1_umi_counts(connection, barcode, ftype):
         for gene, umis in pickle.loads(payload).items():
             merged[gene].update(umis)
     return {gene: Counter(umis) for gene, umis in merged.items()}
+
+
+def load_pass1_umi_bundle(connection, barcode, include_global=True):
+    """Load exon/intron UMI maps and optional global counts in one query."""
+    merged = {
+        "exon": defaultdict(Counter),
+        "intron": defaultdict(Counter),
+    }
+    global_counts = Counter()
+    kinds = ("umi", "global") if include_global else ("umi",)
+    for kind, ftype, payload in _load_barcode_payloads(connection, barcode, kinds):
+        values = pickle.loads(payload)
+        if kind == "umi" and ftype in merged:
+            for gene, umis in values.items():
+                merged[ftype][gene].update(umis)
+        elif kind == "global":
+            global_counts.update(values)
+    return (
+        {ftype: {gene: Counter(umis) for gene, umis in counts.items()} for ftype, counts in merged.items()},
+        global_counts,
+    )
 
 
 def load_pass1_global_counts(connection, barcode):

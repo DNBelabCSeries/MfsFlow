@@ -2,11 +2,13 @@
 project:
 
 ##define sample and barcode information to create config file
-#sample_type support auto and manual for different sequencing library construction strategy 
-#sample_id should be set as a single number (corresponding to the auto sample_type, range 1-12) or multiple numbers separated by commas (corresponding to the manual sample_type, range 1-24)
+#The CLI selects the barcode mode with --plate, --manual, --expectBarcode,
+#or by omitting all three for automatic identification. The fields below are
+#the generated internal representation; users normally do not set sample_type.
+#sample_id is used only for built-in plate/manual modes.
 sample:
-  sample_type: auto #auto or manual
-  sample_id: 1 #1 for auto sample_type or '20,21,22,23,24' for manual sample_type, 
+  sample_type: auto #generated: discover, auto, manual, or custom
+  sample_id: 1 #plate ID for auto, or IDs for manual; unused otherwise
 
 
 #Sequencing File Inputs:

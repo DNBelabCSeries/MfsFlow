@@ -103,6 +103,10 @@ class MfsflowPackageTests(unittest.TestCase):
                 "template_manual.html",
             )
             self.assertEqual(
+                _select_report_template("custom", outdir, template_dir)[1],
+                "custom",
+            )
+            self.assertEqual(
                 _select_report_template(
                     "discover",
                     outdir,

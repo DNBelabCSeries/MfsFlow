@@ -15,6 +15,7 @@ import tempfile
 from collections import defaultdict, Counter
 import multiprocessing
 import json
+import time
 
 try:
     import pysam
@@ -29,9 +30,8 @@ try:
         close_pass1_store,
         dynamic_chunksize,
         finalize_pass1_store,
-        load_pass1_global_counts,
-        load_pass1_read_counts,
-        load_pass1_umi_counts,
+        load_pass1_read_bundle,
+        load_pass1_umi_bundle,
         open_pass1_store,
         pass1_barcode_workloads,
         pass1_barcodes,
@@ -50,9 +50,8 @@ except ImportError:
         close_pass1_store,
         dynamic_chunksize,
         finalize_pass1_store,
-        load_pass1_global_counts,
-        load_pass1_read_counts,
-        load_pass1_umi_counts,
+        load_pass1_read_bundle,
+        load_pass1_umi_bundle,
         open_pass1_store,
         pass1_barcode_workloads,
         pass1_barcodes,
@@ -520,6 +519,11 @@ def cluster_with_global(bc_args):
     return res_bc, res_ex, res_in, res_inex, res_corr, global_dist_counts, gene_dist_counts
 
 def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=None):
+    analysis_started = time.perf_counter()
+
+    def log_phase(label, started):
+        print(f"DGE timing: {label} ({time.perf_counter() - started:.2f}s)", flush=True)
+
     project = config['project']
     out_dir = config['out_dir']
     ham_dist = int(config['counting_opts'].get('Ham_Dist', 0))
@@ -553,6 +557,7 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
     temp_sorted_bam = None
     pass1_store_conn = None
     pass1_store_path = None
+    indexing_started = time.perf_counter()
     try:
         if not os.path.exists(bam_file + ".bai"):
             print(f"Indexing BAM {bam_file} for parallel processing...")
@@ -574,6 +579,7 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
                     os.remove(leftover)
             raise
         bam_file = temp_sorted_bam
+    log_phase("prepare indexed BAM", indexing_started)
 
     try:
         # Get Chromosomes
@@ -609,6 +615,7 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
         expected_chunks = len(pass1_args)
         completed_chunks = 0
         res = partial_read = partial_umi = partial_global = None
+        pass1_started = time.perf_counter()
         with multiprocessing.Pool(worker_count) as pool:
             for res in pool.imap_unordered(count_worker, pass1_args):
                 completed_chunks += 1
@@ -618,6 +625,7 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
                     partial_read,
                     partial_umi,
                     partial_global if collect_global_umis else {},
+                    commit=False,
                 )
                 del partial_read, partial_umi, partial_global, res
 
@@ -628,7 +636,12 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
             raise RuntimeError(
                 f"DGE counting returned {completed_chunks}/{expected_chunks} chromosome chunks."
             )
+        # The pass-1 store is private to this process.  Committing once avoids
+        # one transaction/fsync boundary per chromosome chunk, which is costly
+        # on network-backed temporary directories.
+        pass1_store_conn.commit()
         finalize_pass1_store(pass1_store_conn)
+        log_phase(f"Pass 1 counting ({completed_chunks} chunks)", pass1_started)
 
         print("Pass 1 Complete. Calculating Statistics...")
 
@@ -665,23 +678,29 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
         # bounded without changing the per-barcode clustering result.
         cluster_batch_size = max(8, min(64, cluster_workers * 4))
         processed_bcs = 0
+        clustering_started = time.perf_counter()
         with multiprocessing.Pool(cluster_workers) as pool:
             for batch_start in range(0, total_bcs, cluster_batch_size):
                 batch_bcs = cluster_barcodes[batch_start:batch_start + cluster_batch_size]
-                batch_args = [
-                    (
+                batch_args = []
+                for bc in batch_bcs:
+                    umi_bundle, global_counts = load_pass1_umi_bundle(
+                        pass1_store_conn,
                         bc,
-                        load_pass1_umi_counts(pass1_store_conn, bc, "exon"),
-                        load_pass1_umi_counts(pass1_store_conn, bc, "intron"),
-                        load_pass1_global_counts(pass1_store_conn, bc)
-                        if collect_global_umis else {},
-                        ham_dist,
-                        need_correction_map,
-                        collect_global_umis,
-                        collect_global_umis,
+                        include_global=collect_global_umis,
                     )
-                    for bc in batch_bcs
-                ]
+                    batch_args.append(
+                        (
+                            bc,
+                            umi_bundle["exon"],
+                            umi_bundle["intron"],
+                            global_counts if collect_global_umis else {},
+                            ham_dist,
+                            need_correction_map,
+                            collect_global_umis,
+                            collect_global_umis,
+                        )
+                    )
                 batch_chunksize = dynamic_chunksize(len(batch_bcs), cluster_workers)
                 for res in pool.imap_unordered(
                     cluster_with_global,
@@ -706,6 +725,7 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
 
                 del batch_args
                 del batch_bcs
+        log_phase(f"UMI clustering ({processed_bcs} barcodes)", clustering_started)
 
         # Keep the store open until read matrices are rebuilt below.  Delaying
         # that pass means the large read-count maps do not coexist with the
@@ -714,6 +734,7 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
         del cluster_barcodes
 
         print("\nWriting Matrices...")
+        matrix_started = time.perf_counter()
         
         # Calculate and print correction stats
         if need_correction_map:
@@ -761,8 +782,9 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
         # This pass is intentionally after UMI output so both matrix families
         # are not resident in memory at the same time.
         for bc in pass1_barcodes(pass1_store_conn, "read"):
-            exon_counts = load_pass1_read_counts(pass1_store_conn, bc, "exon")
-            intron_counts = load_pass1_read_counts(pass1_store_conn, bc, "intron")
+            read_bundle = load_pass1_read_bundle(pass1_store_conn, bc)
+            exon_counts = read_bundle["exon"]
+            intron_counts = read_bundle["intron"]
             if exon_counts:
                 final_read_counts['exon'][bc].update(exon_counts)
             if intron_counts:
@@ -786,6 +808,7 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
         cell_stats_path = os.path.join(stats_dir(out_dir), f"{project}.cell_matrix_stats.json")
         _write_json_atomic(cell_stats_path, cell_matrix_stats)
         print(f"Cell matrix QC summary written: {cell_stats_path}")
+        log_phase("write expression matrices", matrix_started)
 
         # Matrix files and the compact QC summary are now the durable outputs.
         # Release the large in-memory count maps before optional H5AD export,
@@ -796,28 +819,37 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
         pass1_store_path = None
 
         if _as_bool(config.get('make_h5ad', True), default=True):
+            h5ad_started = time.perf_counter()
             print("Exporting combined H5AD...")
             h5ad_path = export_h5ad(out_dir, project, config=config)
             print(f"H5AD written: {h5ad_path}")
+            log_phase("export H5AD", h5ad_started)
 
         if not make_sorted_bam and not make_ub_bam:
+            log_phase("DGE total", analysis_started)
             return
 
         if make_ub_bam and not make_sorted_bam:
             if not out_bam:
                 out_bam = os.path.join(out_dir, f"{project}.filtered.Aligned.GeneTagged.UBcorrected.bam")
             print(f"Writing UB-corrected BAM in a single pass ({threads} threads for BAM IO)...")
+            ub_started = time.perf_counter()
             write_corrected_bam_single_pass(bam_file, out_bam, correction_map, ham_dist, threads)
+            log_phase("write UB-corrected BAM", ub_started)
+            log_phase("DGE total", analysis_started)
             return
 
         # Input BAM is coordinate-sorted here either because it already had a
         # valid index or because we created a temporary sorted copy above, so a
         # single-pass write preserves sorted order without per-chrom chunk BAMs.
         print(f"Writing UB-corrected sorted BAM in a single pass ({threads} threads for BAM IO)...")
+        ub_started = time.perf_counter()
         write_corrected_bam_single_pass(bam_file, out_bam, correction_map, ham_dist, threads)
 
         print("Indexing Final BAM...")
         pysam.index(out_bam)
+        log_phase("write/index UB-corrected BAM", ub_started)
+        log_phase("DGE total", analysis_started)
         
     finally:
         if pass1_store_conn is not None or pass1_store_path:

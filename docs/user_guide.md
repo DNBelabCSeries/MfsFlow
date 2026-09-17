@@ -135,21 +135,20 @@ mfsflow \
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `--fastqs` | Yes | Directory containing input R1/R2 FASTQ files |
-| `--genomeDir` | Yes | Reference directory containing `star/` and `genes/genes.gtf` or `genes/genes.gtf.gz` |
-| `--sample` | Yes | Sample name (used for output naming) |
-| `--outdir` | No | Output directory (default: `./<sample_name>`) |
-| `--threads` | No | Number of threads (default: 30) |
+| `--fastqs` | New run | Directory containing input R1/R2 FASTQ files |
+| `--genomeDir` | New run | Reference root containing `star/` and `genes/genes.gtf` or `genes/genes.gtf.gz` |
+| `--sample` | New run | Project/sample name used for output naming |
+| `--outdir` | No | Project root for a new run; creates `XPRESS_PROCESSING/` and `outs/` (default: `./<sample_name>`). Resume also accepts the `XPRESS_PROCESSING/` directory |
+| `--threads` | No | Worker threads (new-run default: 30; resume uses the saved value unless overridden) |
 | `--tmpRoot` | No | Temporary root for intermediate files (e.g., `/dev/shm`) |
-| `--stage` | No | Start from specific stage (Filtering/Mapping/Counting/Summarising) |
+| `--stage` | No | Start stage: Filtering, Mapping, Counting, or Summarising. New runs must use Filtering; later stages require `--resume` |
 | `--resume` | No | Reuse the saved run configuration; requires `--outdir` and an explicit `--stage` |
-| `--plate` | No | Plate ID for automatic barcode mode (mutually exclusive with `--manual`, `--expectBarcode`) |
-| `--manual` | No | Manual barcode IDs (comma-separated, e.g., `"20,21,22"`) (mutually exclusive with `--plate`, `--expectBarcode`) |
-| `--expectBarcode` | No | Path to custom barcode file (mutually exclusive with `--plate`, `--manual`) |
-| `--samplesheet` | No** | CSV samplesheet for equal-length R1/R2 data |
+| `--plate` | No | Use the built-in automatic plate barcode list for a plate ID (mutually exclusive with `--manual`, `--expectBarcode`) |
+| `--manual` | No | Use the built-in manual barcode list for comma-separated sample IDs, e.g. `"20,21,22"` (mutually exclusive with `--plate`, `--expectBarcode`) |
+| `--expectBarcode` | No | Use a custom 3-column barcode TSV (mutually exclusive with `--plate`, `--manual`) |
+| `--samplesheet` | Conditional | Required for equal-length R1/R2 data; CSV columns are `read1,read2,barcode`. Do not use it when R2 contains the embedded 20-base barcode |
 
 When none of `--plate`, `--manual`, or `--expectBarcode` is specified, the pipeline automatically runs barcode discovery mode, inferring the barcode set from observed reads.
-**Required for equal-length R1/R2 data.
 
 ### Example Commands
 
@@ -381,7 +380,7 @@ MfsFlow writes the complete run configuration to
 `XPRESS_PROCESSING/config/run_config.yaml` before execution. Use the normal
 CLI arguments to create a run; the generated YAML preserves the exact paths
 and options used for that run. The current CLI does not accept a separate
-`--config` argument.
+`--config` argument; resume mode loads the saved YAML automatically.
 
 ### Performance Optimization
 

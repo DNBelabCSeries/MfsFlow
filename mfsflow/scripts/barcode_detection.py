@@ -43,7 +43,10 @@ def read_whitelist(bcfile):
         # Robust splitting: treats commas, tabs, spaces, newlines all as delimiters
         tokens = re.split(r'[,\s]+', content)
         # Remove empty strings resulting from consecutive delimiters
-        bc_wl = sorted(list(set([t for t in tokens if t])))
+        # FASTQ barcodes are normalized to uppercase by the filtering path;
+        # normalize the custom whitelist too so documented case-insensitive
+        # input behaves consistently in strict custom/manual/plate modes.
+        bc_wl = sorted({t.strip().upper() for t in tokens if t.strip()})
         
         return set(bc_wl)
     except Exception as e:

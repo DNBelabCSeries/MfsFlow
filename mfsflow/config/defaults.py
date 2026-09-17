@@ -10,8 +10,8 @@ reference files, filtering thresholds, and pipeline options.
 DEFAULT_CONFIG = {
     "project": "",  # Will be set from command line
     "sample": {
-        "sample_type": "auto",      # Overridden by --manual/--plate/--expectBarcode; defaults to discover
-        "sample_id": "1"            # Overridden by --manual/--plate
+        "sample_type": "discover",  # Overridden by --manual/--plate/--expectBarcode
+        "sample_id": "discover"     # Used only by built-in auto/manual barcode modes
     },
     "sequence_files": {
         "file1": {

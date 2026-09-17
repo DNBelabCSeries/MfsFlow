@@ -25,6 +25,7 @@ if yaml is not None and not isinstance(yaml, ModuleType):
 
 from mfsflow.config.builder import (
     build_base_config,
+    configure_reads,
     configure_reference,
     discover_fastq_pairs,
     load_samplesheet,
@@ -71,6 +72,14 @@ class CliInputTests(unittest.TestCase):
                             "min_umis": None,
                         },
                     )
+
+                    if case["expectBarcode"]:
+                        self.assertEqual(config["sample"]["sample_type"], "custom")
+                        self.assertIsNone(config["sample"]["sample_id"])
+                        self.assertEqual(
+                            config["barcodes"]["barcode_file"],
+                            os.path.abspath(custom_barcode),
+                        )
 
     def test_later_stage_requires_explicit_resume(self):
         with self.assertRaises(SystemExit) as error, mock.patch("sys.stderr"):
@@ -206,6 +215,12 @@ class CliInputTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "Duplicate read1/read2 pair"):
                 load_samplesheet(sheet, tmpdir)
+
+    def test_samplesheet_is_rejected_for_embedded_barcode_layout(self):
+        config = {"sequence_files": {"file1": {}, "file2": {}}}
+        with mock.patch("mfsflow.config.builder.get_read_length", side_effect=[90, 110]), \
+                self.assertRaisesRegex(ValueError, "only supported when R1 and R2 have equal lengths"):
+            configure_reads(config, [("R1.fq.gz", "R2.fq.gz")], has_samplesheet=True)
 
     def test_configure_reference_accepts_gzipped_gtf(self):
         with tempfile.TemporaryDirectory() as tmpdir:

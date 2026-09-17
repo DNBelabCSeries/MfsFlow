@@ -27,6 +27,8 @@ class GeneBodyCoverageTests(unittest.TestCase):
 
             plus = models["plus"]
             minus = models["minus"]
+            self.assertIn("exon_offsets", plus)
+            self.assertIn("bin_bounds", plus)
 
             plus_overlap, plus_bins = _project_blocks_to_gene_body(plus, [(1, 11)])
             minus_overlap, minus_bins = _project_blocks_to_gene_body(minus, [(91, 101)])

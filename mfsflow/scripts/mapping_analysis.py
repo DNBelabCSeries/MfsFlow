@@ -396,6 +396,7 @@ def main():
         bc_bin_file = os.devnull
 
     streams_raw_chunks = any(os.path.basename(x).endswith(".raw.tagged.bam") for x in (umi_bams + internal_bams))
+    length_started = time.perf_counter()
     umi_read_len = determine_target_read_length(
         umi_bams,
         "umi",
@@ -412,6 +413,10 @@ def main():
         expect_id_file,
         samtools,
     ) if internal_bams else 0
+    print(
+        f"Mapping timing: read-length detection ({time.perf_counter() - length_started:.2f}s)",
+        flush=True,
+    )
 
     if umi_read_len > 0:
         print(f"Detected UMI Read Length: {umi_read_len}")
@@ -465,7 +470,9 @@ def main():
             prefix_umi,
         )
         
+        star_started = time.perf_counter()
         run_star_pipe(corrector_args, cmd_umi, timeout=mapping_timeout)
+        print(f"Mapping timing: UMI correction + STAR ({time.perf_counter() - star_started:.2f}s)", flush=True)
         print("STAR UMI finished.")
 
     # Run Internal
@@ -485,7 +492,9 @@ def main():
             prefix_int,
         )
         
+        star_started = time.perf_counter()
         run_star_pipe(corrector_args, cmd_int, timeout=mapping_timeout)
+        print(f"Mapping timing: Internal correction + STAR ({time.perf_counter() - star_started:.2f}s)", flush=True)
         print("STAR Internal finished.")
         
 

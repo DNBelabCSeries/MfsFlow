@@ -7,7 +7,9 @@ from mfsflow.scripts.dge_utils import (
     dynamic_chunksize,
     finalize_pass1_store,
     load_pass1_global_counts,
+    load_pass1_read_bundle,
     load_pass1_read_counts,
+    load_pass1_umi_bundle,
     load_pass1_umi_counts,
     open_pass1_store,
     pass1_barcode_workloads,
@@ -58,9 +60,17 @@ class DgeUtilsTests(unittest.TestCase):
                 self.assertEqual(pass1_barcodes(connection, "read"), ["BC1"])
                 self.assertEqual(load_pass1_read_counts(connection, "BC1", "exon"), {"G1": 3})
                 self.assertEqual(
+                    load_pass1_read_bundle(connection, "BC1"),
+                    {"exon": {"G1": 3}, "intron": {"G1": 1}},
+                )
+                self.assertEqual(
                     dict(load_pass1_umi_counts(connection, "BC1", "exon")["G1"]),
                     {"AAAA": 2},
                 )
+                umi_bundle, global_counts = load_pass1_umi_bundle(connection, "BC1")
+                self.assertEqual(dict(umi_bundle["exon"]["G1"]), {"AAAA": 2})
+                self.assertEqual(dict(umi_bundle["intron"]["G1"]), {"AAAT": 1})
+                self.assertEqual(dict(global_counts), {"AAAA": 2, "AAAT": 1})
                 self.assertEqual(
                     dict(load_pass1_global_counts(connection, "BC1")),
                     {"AAAA": 2, "AAAT": 1},

@@ -7,8 +7,6 @@ sample identification, and performing barcode discovery when needed.
 """
 
 import os
-import shutil
-import sys
 
 from mfsflow.logging_utils import log_info, log_error
 from mfsflow.path_layout import barcode_dir, config_dir, ensure_layout, outputs_dir
@@ -66,22 +64,21 @@ def create_barcode_tables(config):
 
     if sample_type in ("custom", "external"):
         provided_bc = config["barcodes"]["barcode_file"]
-        log_info(f"Using custom barcode file: {provided_bc}")
+        rows = _load_custom_barcode_table(provided_bc)
+        log_info(f"Using custom barcode file: {provided_bc} ({len(rows)} well(s))")
         dest_summary = os.path.join(config_dir(out_path), "expect_id_barcode.tsv")
         dest_pipe = os.path.join(config_dir(out_path), "expect_barcode.tsv")
 
-        shutil.copy(provided_bc, dest_summary)
-
-        with open(provided_bc, "r") as infile, open(dest_pipe, "w") as outfile:
-            for line in infile:
-                parts = line.strip().split("\t")
-                if len(parts) >= 3:
-                    if parts[0].lower() == "wellid":
-                        continue
-                    for barcode in parts[1].split(",") + parts[2].split(","):
-                        barcode = barcode.strip()
-                        if barcode:
-                            outfile.write(barcode + "\n")
+        with open(dest_summary, "w", encoding="utf-8") as summary, open(
+            dest_pipe, "w", encoding="utf-8"
+        ) as whitelist:
+            print("wellID\tumi_barcodes\tinternal_barcodes", file=summary)
+            for well_id, values in rows.items():
+                umi = values["umi"]
+                internal = values["internal"]
+                print(f"{well_id}\t{','.join(umi)}\t{','.join(internal)}", file=summary)
+                for barcode in umi + internal:
+                    print(barcode, file=whitelist)
 
         config["barcodes"]["barcode_file"] = dest_pipe
         return
@@ -117,6 +114,65 @@ def create_barcode_tables(config):
                 print(barcode, file=pipe_file)
 
     config["barcodes"]["barcode_file"] = os.path.join(config_dir(out_path), "expect_barcode.tsv")
+
+
+def _load_custom_barcode_table(path):
+    """Load and validate a custom well/barcode TSV.
+
+    The pipeline uses one canonical uppercase representation downstream. A
+    barcode assigned to more than one well or barcode type is rejected early;
+    otherwise the correction map would silently use the last assignment.
+    """
+    if not path:
+        raise ValueError("sample_type=custom requires barcodes.barcode_file or --expectBarcode FILE")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Custom barcode file not found: {path}")
+
+    grouped = {}
+    owners = {}
+    with open(path, "r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            if not raw_line.strip():
+                continue
+            parts = raw_line.rstrip("\r\n").split("\t")
+            if parts and parts[0].strip().lstrip("\ufeff").lower() == "wellid":
+                continue
+            if len(parts) < 3:
+                raise ValueError(
+                    f"Custom barcode file {path} line {line_number} must contain "
+                    "wellID, umi_barcodes, and internal_barcodes separated by tabs"
+                )
+
+            well_id = parts[0].strip().upper()
+            if not well_id:
+                raise ValueError(f"Custom barcode file {path} line {line_number} has an empty wellID")
+
+            values = grouped.setdefault(well_id, {"umi": [], "internal": []})
+            row_has_barcode = False
+            for column, barcode_type in ((parts[1], "umi"), (parts[2], "internal")):
+                for barcode in (item.strip().upper() for item in column.split(",")):
+                    if not barcode:
+                        continue
+                    row_has_barcode = True
+                    owner = (well_id, barcode_type)
+                    previous = owners.get(barcode)
+                    if previous is not None and previous != owner:
+                        raise ValueError(
+                            f"Custom barcode {barcode} is assigned to both "
+                            f"{previous[0]} ({previous[1]}) and {well_id} ({barcode_type})"
+                        )
+                    owners[barcode] = owner
+                    if barcode not in values[barcode_type]:
+                        values[barcode_type].append(barcode)
+
+            if not row_has_barcode:
+                raise ValueError(
+                    f"Custom barcode file {path} line {line_number} has no barcode sequence"
+                )
+
+    if not grouped:
+        raise ValueError(f"Custom barcode file is empty: {path}")
+    return grouped
 
 
 def run_barcode_discovery(config, project, analysis_dir, assign_barcodes=True):

@@ -56,6 +56,10 @@ Complete run configuration in YAML format. Contains all parameters used for the 
 
 **Purpose**: Reproducibility and provenance tracking.
 
+The `sample_type` and `sample_id` fields shown below are generated internal
+fields. Select the barcode mode with `--plate`, `--manual`, or
+`--expectBarcode`; do not add a separate `--sample-type` option.
+
 **Format**: YAML
 
 Example:

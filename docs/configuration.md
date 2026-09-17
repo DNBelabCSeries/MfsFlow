@@ -1,6 +1,6 @@
 # Configuration Reference
 
-This document provides a complete reference for all configuration options in MfsFlow. Configuration can be specified via command-line arguments or a YAML configuration file.
+This document provides a complete reference for all configuration options in MfsFlow. New runs are configured through the command line; MfsFlow then writes a YAML snapshot that is reused by resume mode.
 
 ## Table of Contents
 
@@ -30,7 +30,7 @@ mfsflow \
   --threads 20
 ```
 
-### Method 2: Generated YAML Configuration
+### Method 2: Generated YAML Configuration (for resume)
 
 The CLI builds and writes `XPRESS_PROCESSING/config/run_config.yaml` from the
 command-line options before starting the pipeline. Resume mode loads this file
@@ -61,14 +61,19 @@ project: "Sample01"
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `sample.sample_type` | string | "auto" | Sample type: "auto", "manual", or "custom" |
-| `sample.sample_id` | string/int | "1" | Sample ID(s): single number for auto, comma-separated for manual |
+| `sample.sample_type` | string | "discover" | Generated internal field. Users select a barcode mode with the CLI options below; normally do not set this directly |
+| `sample.sample_id` | string/int | "discover" | Generated internal field for built-in plate/manual modes; unused for automatic discovery and custom barcode tables |
 | `barcodes.barcode_file` | string | "" | Path to custom barcode file (for `--expectBarcode` mode) |
 
-### Command-Line Equivalent
-- `--plate 1` → `sample_type: "auto"`, `sample_id: "1"`
-- `--manual "20,21,22"` → `sample_type: "manual"`, `sample_id: "20,21,22"`
-- `--expectBarcode /path/to/barcodes.tsv` → `sample_type: "custom"`, `barcodes.barcode_file: /path/to/barcodes.tsv`
+### How to Select the Mode
+- Omit `--plate`, `--manual`, and `--expectBarcode` to let the pipeline identify the built-in plate/manual barcode set automatically.
+- Use `--plate 1` for a built-in automatic plate barcode list.
+- Use `--manual "20,21,22"` for built-in manual barcode IDs.
+- Use `--expectBarcode /path/to/barcodes.tsv` for a custom barcode table.
+
+The corresponding `sample_type` value is written automatically into
+`run_config.yaml` for reproducibility; it is an implementation field, not a
+separate command-line option.
 
 ### Custom Barcode File Format (`--expectBarcode`)
 
@@ -124,8 +129,8 @@ cat custom_barcodes.tsv
 ### Example
 ```yaml
 sample:
-  sample_type: auto  # or "manual" or "custom"
-  sample_id: 1       # or "20,21,22" for manual
+  sample_type: auto  # discover, auto, manual, or custom
+  sample_id: 1       # auto plate ID or "20,21,22" for manual; unused for custom
 ```
 
 ## Sequence Files Configuration

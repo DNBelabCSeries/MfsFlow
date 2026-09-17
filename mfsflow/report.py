@@ -940,6 +940,11 @@ def _select_report_template(sample_type, sample_outdir, template_dir, config=Non
         report_mode = discovered_type
     elif sample_type in ("auto", "manual"):
         report_mode = sample_type
+    elif sample_type == "custom":
+        # Custom barcode sets use the manual-layout template, but retain their
+        # own mode in the report context so labels and output filenames do not
+        # incorrectly say "Manual samples".
+        report_mode = "custom"
     elif sample_type == "discover":
         report_mode = _read_discovered_sample_type(sample_outdir, (config or {}).get("project")) or "auto"
     else:

@@ -20,26 +20,87 @@ def build_parser():
     Returns:
         argparse.ArgumentParser: Configured argument parser.
     """
-    parser = argparse.ArgumentParser(description="MfsFlow Data Analysis Pipeline")
+    stage_choices = ", ".join(STAGE_ORDER)
+    parser = argparse.ArgumentParser(
+        prog="mfsflow",
+        description="MfsFlow Smart-seq3/MGI analysis pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "New run: --fastqs, --genomeDir, and --sample are required; "
+            "the default start stage is Filtering.\n"
+            "Resume: use --resume --outdir PROJECT_DIR --stage STAGE; "
+            "saved inputs and barcode tables are reused.\n"
+            "Read layout: R2=R1+20 uses the embedded barcode; equal-length R1/R2 "
+            "requires --samplesheet."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--fastqs", help="Directory containing input R1/R2 FASTQ files")
-    parser.add_argument("--samplesheet", help="CSV samplesheet for equal-length R1/R2 data")
-    parser.add_argument("--genomeDir", help="Reference directory containing star/ and genes/genes.gtf or genes.gtf.gz")
-    parser.add_argument("--sample", help="Sample name")
-    parser.add_argument("--outdir", help="Output directory (default: ./<sample_name>)")
-    parser.add_argument("--threads", type=int, help="Number of threads (default: 30; resume keeps the original value)")
-    parser.add_argument("--tmpRoot", help="Temporary root for chunk BAM/FASTQ files, e.g. /dev/shm")
-    parser.add_argument("--stage", choices=STAGE_ORDER, help="Analysis stage to start from")
+    parser.add_argument(
+        "--fastqs",
+        metavar="DIR",
+        help="Directory containing input R1/R2 FASTQ files (required for a new run)",
+    )
+    parser.add_argument(
+        "--samplesheet",
+        metavar="CSV",
+        help="CSV with read1,read2,barcode columns for equal-length R1/R2 data; paths may be relative to --fastqs; do not use with an R2-embedded barcode",
+    )
+    parser.add_argument(
+        "--genomeDir",
+        "--genome-dir",
+        dest="genomeDir",
+        metavar="DIR",
+        help="Reference root containing star/ and genes/genes.gtf or genes.gtf.gz (required for a new run)",
+    )
+    parser.add_argument("--sample", metavar="NAME", help="Project/sample name used in output filenames (required for a new run)")
+    parser.add_argument(
+        "--outdir",
+        metavar="DIR",
+        help="Project root for a new run; creates XPRESS_PROCESSING/ and outs/ (default: ./<sample_name>); resume also accepts the XPRESS_PROCESSING directory",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        metavar="N",
+        help="Worker threads (new run default: 30; resume uses the saved value unless overridden)",
+    )
+    parser.add_argument(
+        "--tmpRoot",
+        "--tmp-root",
+        dest="tmpRoot",
+        metavar="DIR",
+        help="Writable temporary root for chunk BAM/FASTQ files, e.g. /dev/shm",
+    )
+    parser.add_argument(
+        "--stage",
+        choices=STAGE_ORDER,
+        metavar="STAGE",
+        help=f"Stage to start from ({stage_choices}); new runs must use Filtering, later stages require --resume",
+    )
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume an existing --outdir using its saved run_config.yaml without rebuilding inputs or barcode tables",
+        help="Resume an existing --outdir using saved run_config.yaml; requires --stage and reuses inputs/barcode tables",
     )
 
     mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument("--manual", help='Manual sample IDs (comma separated, e.g. "20,21"). Sets sample_type=manual.')
-    mode_group.add_argument("--plate", help='Plate ID (e.g. "1"). Sets sample_type=auto.')
-    mode_group.add_argument("--expectBarcode", help="Path to custom barcode file. Sets sample_type=custom.")
+    mode_group.add_argument(
+        "--manual",
+        metavar="ID[,ID...]",
+        help='Use the built-in manual barcode list for these sample IDs (comma-separated, e.g. "20,21")',
+    )
+    mode_group.add_argument(
+        "--plate",
+        metavar="ID",
+        help="Use the built-in automatic plate barcode list for plate ID (e.g. 1)",
+    )
+    mode_group.add_argument(
+        "--expectBarcode",
+        "--expect-barcode",
+        dest="expectBarcode",
+        metavar="FILE",
+        help="Use a custom expected-barcode TSV (wellID + UMI/internal barcode columns)",
+    )
     return parser
 
 

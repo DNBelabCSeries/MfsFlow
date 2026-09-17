@@ -18,6 +18,7 @@ import gzip
 import glob
 import hashlib
 import tempfile
+import time
 from functools import lru_cache
 
 try:
@@ -31,6 +32,7 @@ except ImportError:
 LOG_INTERVAL_READS = 10_000_000  # Print progress every N reads
 GENEBODY_BIN_SIZE = 100_000  # Bin size for gene body coverage calculation
 LRU_CACHE_SIZE = 65_536  # Default LRU cache size for parsing functions
+_COUNT_TAGS = {"GX", "XS", "CB"}
 
 def check_dependencies(samtools_exec, featurecounts_exec):
     def check_one(tool, name):
@@ -234,6 +236,8 @@ def load_gene_models(gtf_file):
                 "exons": exons,
                 "length": length,
             }
+            candidate["exon_offsets"] = _build_exon_offsets(exons, tx["strand"])
+            candidate["bin_bounds"] = _build_bin_bounds(length)
             if best is None or (length, transcript_id) > (best["length"], best["transcript_id"]):
                 best = candidate
         if best is None:
@@ -281,6 +285,25 @@ def _merge_half_open_intervals(intervals):
             curr_start, curr_end = next_start, next_end
     merged.append((curr_start, curr_end))
     return merged
+
+
+def _build_exon_offsets(exons, strand):
+    """Precompute transcript offsets used by every gene-body projection."""
+    offsets = []
+    offset = 0
+    ordered_exons = reversed(exons) if strand == "-" else exons
+    for exon_start, exon_end in ordered_exons:
+        offsets.append((exon_start, exon_end, offset))
+        offset += exon_end - exon_start
+    return tuple(offsets)
+
+
+def _build_bin_bounds(length):
+    """Precompute the 100 transcript-body bin boundaries for one model."""
+    return tuple(
+        ((bin_idx * length) // 100, ((bin_idx + 1) * length) // 100)
+        for bin_idx in range(100)
+    )
 
 
 @lru_cache(maxsize=LRU_CACHE_SIZE)
@@ -618,6 +641,7 @@ def run_featurecounts_cmd(
     """
     threads = max(1, int(threads))
     print(f"Running featureCounts for {feature_type} (Strand: {strand_mode}, Layout: {read_layout}, Threads: {threads})...")
+    started = time.perf_counter()
     output_counts = f"{out_prefix}.counts.txt"
 
     cmd = build_featurecounts_cmd(
@@ -646,6 +670,7 @@ def run_featurecounts_cmd(
 
     target_bam = f"{out_prefix}.bam"
     os.rename(generated_bam, target_bam)
+    print(f"featureCounts timing: {feature_type} ({time.perf_counter() - started:.2f}s)", flush=True)
 
     return target_bam
 
@@ -964,12 +989,11 @@ def _project_blocks_to_gene_body(model, blocks):
     total_overlap = 0
     length = model["length"]
 
-    exon_offsets = []
-    offset = 0
-    exons_5_to_3 = list(reversed(model["exons"])) if model["strand"] == "-" else model["exons"]
-    for exon_start, exon_end in exons_5_to_3:
-        exon_offsets.append((exon_start, exon_end, offset))
-        offset += exon_end - exon_start
+    exon_offsets = model.get("exon_offsets")
+    if exon_offsets is None:
+        # Keep the helper compatible with callers constructing a model by
+        # hand, while production models use the precomputed tuple.
+        exon_offsets = _build_exon_offsets(model["exons"], model["strand"])
 
     for block_start, block_end in blocks:
         for exon_start, exon_end, exon_offset in exon_offsets:
@@ -986,19 +1010,28 @@ def _project_blocks_to_gene_body(model, blocks):
                 tx_end = exon_offset + (ov_end - exon_start)
 
             total_overlap += ov_end - ov_start
-            _add_transcript_interval_to_bins(tx_start, tx_end, length, increments)
+            _add_transcript_interval_to_bins(
+                tx_start,
+                tx_end,
+                length,
+                increments,
+                model.get("bin_bounds"),
+            )
 
     return total_overlap, increments
 
 
-def _add_transcript_interval_to_bins(tx_start, tx_end, length, increments):
+def _add_transcript_interval_to_bins(tx_start, tx_end, length, increments, bin_bounds=None):
     if tx_end <= tx_start:
         return
     first_bin = min(99, (tx_start * 100) // length)
     last_bin = min(99, ((tx_end - 1) * 100) // length)
     for bin_idx in range(first_bin, last_bin + 1):
-        bin_start = (bin_idx * length) // 100
-        bin_end = ((bin_idx + 1) * length) // 100
+        if bin_bounds is None:
+            bin_start = (bin_idx * length) // 100
+            bin_end = ((bin_idx + 1) * length) // 100
+        else:
+            bin_start, bin_end = bin_bounds[bin_idx]
         if bin_end <= bin_start:
             continue
         overlap = min(tx_end, bin_end) - max(tx_start, bin_start)
@@ -1029,6 +1062,7 @@ def process_bam_and_calculate_stats(
     Calculates Stats on the fly.
     """
     target_desc = "shared output handle" if output_handle is not None else out_bam
+    started = time.perf_counter()
     print(f"Processing BAM {input_bam} -> {target_desc} (Source: {source_label}, Threads: {threads})...")
 
     read_stats = collections.defaultdict(lambda: collections.defaultdict(int))
@@ -1122,7 +1156,7 @@ def process_bam_and_calculate_stats(
                     for tag, value in read.get_tags():
                         if tag == "XT":
                             xt_values.append(value)
-                        elif tag not in tag_values:
+                        elif tag in _COUNT_TAGS and tag not in tag_values:
                             tag_values[tag] = value
 
                     gene_id, re_tag, assigned_category = choose_assignment_from_xt(xt_values)
@@ -1194,7 +1228,11 @@ def process_bam_and_calculate_stats(
                 if f_out_ctx is not None:
                     f_out_ctx.close()
 
-        print("\nProcessing complete (via pysam).")
+        print(
+            f"\nProcessing complete (via pysam; {source_label}; "
+            f"{time.perf_counter() - started:.2f}s).",
+            flush=True,
+        )
         return read_stats, cov_arr, cov_count
 
     except ImportError:
@@ -1314,7 +1352,10 @@ def process_bam_and_calculate_stats(
         proc_in.wait()
         proc_out.wait()
 
-    print("\nProcessing complete.")
+    print(
+        f"\nProcessing complete ({source_label}; {time.perf_counter() - started:.2f}s).",
+        flush=True,
+    )
     return read_stats, cov_arr, cov_count
 
 def split_bam_smartseq3(bam_file, threads, samtools_exec):
