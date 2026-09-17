@@ -1,6 +1,9 @@
 import os
 import sys
 import unittest
+import subprocess
+import tempfile
+from mfsflow.scripts import stream_corrector
 
 from mfsflow.scripts.stream_corrector import get_or_apply_correction
 
@@ -26,6 +29,34 @@ class FakeRead:
 
 
 class StreamCorrectorTests(unittest.TestCase):
+    @unittest.skipIf(stream_corrector.pysam is None, "pysam not installed")
+    def test_uncompressed_pipe_preserves_read_order_and_tags(self):
+        pysam = stream_corrector.pysam
+        with tempfile.TemporaryDirectory() as root:
+            source = os.path.join(root, "input.bam")
+            output = os.path.join(root, "output.bam")
+            idmap = os.path.join(root, "ids.tsv")
+            with open(idmap, "w") as handle:
+                handle.write("wellID\tumi_barcode\tinternal_barcode\nP1A1\tACGT\tTGCA\n")
+            with pysam.AlignmentFile(source, "wb", header={"HD": {"VN": "1.6"}}) as bam:
+                for flag in (77, 141):
+                    read = pysam.AlignedSegment()
+                    read.query_name = "pair1"
+                    read.flag = flag
+                    read.query_sequence = "AACCGGTT"
+                    read.query_qualities = [30] * 8
+                    read.set_tags([("CR", "ACGT"), ("CC", "ACGT"), ("CB", "P1A1"), ("UR", "AAAA")])
+                    bam.write(read)
+            with open(output, "wb") as handle:
+                subprocess.run(
+                    [sys.executable, "-m", "mfsflow.scripts.stream_corrector",
+                     "--binning", os.devnull, "--idmap", idmap, "--type", "umi", source],
+                    stdout=handle, stderr=subprocess.PIPE, check=True,
+                )
+            with pysam.AlignmentFile(source, "rb", check_sq=False) as before, \
+                 pysam.AlignmentFile(output, "rb", check_sq=False) as after:
+                self.assertEqual([r.to_string() for r in before], [r.to_string() for r in after])
+
     def test_pre_corrected_read_is_not_sequence_adjusted_again(self):
         read = FakeRead(
             flag=77,

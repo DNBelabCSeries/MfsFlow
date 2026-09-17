@@ -5,6 +5,34 @@ import pickle
 import sqlite3
 import tempfile
 from collections import Counter, defaultdict
+from concurrent.futures import FIRST_COMPLETED, wait
+
+
+def bounded_results(executor, function, arguments, max_pending):
+    """Submit lazily and refill on completion without a batch barrier."""
+    if max_pending < 1:
+        raise ValueError("max_pending must be positive")
+    arguments = iter(arguments)
+    pending = set()
+    try:
+        for _ in range(max_pending):
+            try:
+                argument = next(arguments)
+            except StopIteration:
+                break
+            pending.add(executor.submit(function, argument))
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                yield future.result()
+                try:
+                    argument = next(arguments)
+                except StopIteration:
+                    continue
+                pending.add(executor.submit(function, argument))
+    finally:
+        for future in pending:
+            future.cancel()
 
 
 def open_pass1_store(out_dir, project, tmp_root=None):

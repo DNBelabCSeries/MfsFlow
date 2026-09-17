@@ -1,8 +1,11 @@
 import os
 import tempfile
 import unittest
+import threading
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
 from mfsflow.scripts.dge_utils import (
+    bounded_results,
     close_pass1_store,
     dynamic_chunksize,
     finalize_pass1_store,
@@ -21,6 +24,48 @@ from mfsflow.scripts.dge_utils import (
 
 
 class DgeUtilsTests(unittest.TestCase):
+    def test_scheduler_refills_while_first_task_is_blocked(self):
+        third_started = threading.Event()
+
+        def work(value):
+            if value == 0:
+                if not third_started.wait(5):
+                    raise RuntimeError("Batch barrier prevented third task from starting")
+            if value == 2:
+                third_started.set()
+            return value
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(sorted(bounded_results(pool, work, range(6), 2)), list(range(6)))
+
+    def test_scheduler_limits_argument_loading_and_propagates_errors(self):
+        loaded = []
+
+        def arguments():
+            for value in range(100):
+                loaded.append(value)
+                yield value
+
+        def fail(value):
+            raise ValueError("worker failed")
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            with self.assertRaisesRegex(ValueError, "worker failed"):
+                list(bounded_results(pool, fail, arguments(), 2))
+        self.assertEqual(loaded, [0, 1])
+
+    def test_process_scheduler_preserves_clustering_results(self):
+        from mfsflow.scripts.dge_analysis import cluster_with_global
+        arguments = [
+            (str(i), {"G1": {"AAAA": 10, "AAAT": 1}},
+             {"G1": {"AAAA": 2}}, {"AAAA": 12, "AAAT": 1}, 1, True, True, True)
+            for i in range(4)
+        ]
+        expected = sorted(map(cluster_with_global, arguments))
+        with ProcessPoolExecutor(max_workers=2) as pool:
+            actual = sorted(bounded_results(pool, cluster_with_global, arguments, 2))
+        self.assertEqual(actual, expected)
+
     def test_worker_count_respects_task_count_and_optional_cap(self):
         self.assertEqual(resolve_worker_count(20, 3), 3)
         self.assertEqual(resolve_worker_count(20, 30, {"max_dge_workers": 6}), 6)

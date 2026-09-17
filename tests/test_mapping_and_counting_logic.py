@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from mfsflow.scripts.mapping_analysis import (
+    build_mapping_producer,
     build_star_command,
     build_star_misc_base,
     run_star_pipe,
@@ -17,9 +18,11 @@ from mfsflow.scripts.mapping_analysis import (
 from mfsflow.scripts.dge_utils import balance_reference_chunks, summarize_exon_intron_counts
 from mfsflow.scripts.read_utils import is_pair_representative
 from mfsflow.scripts.run_featurecounts import (
+    _config_bool,
     build_featurecounts_cmd,
     normalize_read_category,
     resolve_counting_strand_modes,
+    run_parallel_fc_postprocessing,
     should_count_read,
     update_read_stats,
 )
@@ -28,6 +31,140 @@ from mfsflow.stages.mapping import run_mapping_stage
 
 
 class MappingAndCountingLogicTests(unittest.TestCase):
+    def test_counting_parallel_option_parses_yaml_style_booleans(self):
+        self.assertTrue(_config_bool("yes"))
+        self.assertTrue(_config_bool(None, default=True))
+        self.assertFalse(_config_bool("no", default=True))
+
+    def test_parallel_fc_postprocessing_preserves_source_order_and_budget(self):
+        created_processes = []
+
+        class FakeProcess:
+            def __init__(self, target, args, name):
+                self.target = target
+                self.args = args
+                self.name = name
+                self.exitcode = None
+                self.pid = None
+                created_processes.append(self)
+
+            def start(self):
+                self.pid = len(created_processes)
+                source = self.args[6]
+                with open(self.args[1], "wb") as handle:
+                    handle.write(b"BAM")
+                with open(self.args[2], "w", encoding="utf-8") as handle:
+                    json.dump(
+                        {
+                            "read_stats": {source: {"Exon": 1}},
+                            "coverage": [1] * 100,
+                            "coverage_reads": 1,
+                        },
+                        handle,
+                    )
+                self.exitcode = 0
+
+            def join(self):
+                return None
+
+            def is_alive(self):
+                return False
+
+            def terminate(self):
+                self.exitcode = -15
+
+        fake_context = SimpleNamespace(Process=FakeProcess)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            internal = os.path.join(tmpdir, "internal.bam")
+            umi = os.path.join(tmpdir, "umi.bam")
+            for path in (internal, umi):
+                with open(path, "wb") as handle:
+                    handle.write(b"FC")
+
+            with mock.patch(
+                "mfsflow.scripts.run_featurecounts._parallel_postprocess_supported",
+                return_value=True,
+            ), mock.patch(
+                "mfsflow.scripts.run_featurecounts.multiprocessing.get_context",
+                return_value=fake_context,
+            ):
+                results = run_parallel_fc_postprocessing(
+                    [("Internal", internal, 0), ("UMI", umi, 1)],
+                    "samtools",
+                    20,
+                    {},
+                    {},
+                    True,
+                    {},
+                    {},
+                    {"Internal": 0.5, "UMI": 0.25},
+                    42,
+                )
+
+            self.assertEqual([result[0] for result in results], ["Internal", "UMI"])
+            self.assertEqual([process.args[4] for process in created_processes], [4, 4])
+            self.assertEqual(results[0][3]["Internal"]["Exon"], 1)
+            self.assertFalse(os.path.exists(created_processes[0].args[2]))
+
+    def test_parallel_fc_postprocessing_cleans_outputs_after_worker_failure(self):
+        created_paths = []
+
+        class FailingProcess:
+            def __init__(self, target, args, name):
+                self.args = args
+                self.name = name
+                self.exitcode = None
+                self.pid = None
+
+            def start(self):
+                self.pid = 1
+                for path in self.args[1:3]:
+                    with open(path, "wb") as handle:
+                        handle.write(b"partial")
+                    created_paths.append(path)
+                self.exitcode = 1 if self.name.endswith("umi") else 0
+
+            def join(self):
+                return None
+
+            def is_alive(self):
+                return False
+
+            def terminate(self):
+                self.exitcode = -15
+
+        fake_context = SimpleNamespace(Process=FailingProcess)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            internal = os.path.join(tmpdir, "internal.bam")
+            umi = os.path.join(tmpdir, "umi.bam")
+            for path in (internal, umi):
+                with open(path, "wb") as handle:
+                    handle.write(b"FC")
+
+            with mock.patch(
+                "mfsflow.scripts.run_featurecounts._parallel_postprocess_supported",
+                return_value=True,
+            ), mock.patch(
+                "mfsflow.scripts.run_featurecounts.multiprocessing.get_context",
+                return_value=fake_context,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "UMI rc=1"):
+                    run_parallel_fc_postprocessing(
+                        [("Internal", internal, 0), ("UMI", umi, 1)],
+                        "samtools",
+                        8,
+                        {},
+                        {},
+                        False,
+                        {},
+                        {},
+                        {"Internal": 1.0, "UMI": 1.0},
+                        42,
+                    )
+
+            self.assertTrue(created_paths)
+            self.assertTrue(all(not os.path.exists(path) for path in created_paths))
+
     def test_build_star_misc_base_uses_target_specific_overhang(self):
         misc = build_star_misc_base(
             "/ref/star",
@@ -42,7 +179,36 @@ class MappingAndCountingLogicTests(unittest.TestCase):
         self.assertEqual(misc[overhang_index + 1], "100")
         # stream_corrector outputs BAM; STAR must decode via samtools view
         command_index = misc.index("--readFilesCommand")
-        self.assertEqual(misc[command_index + 1], "samtools view")
+        self.assertEqual(misc[command_index + 1], "samtools view -@ 1")
+
+    def test_pre_corrected_chunks_bypass_python_corrector(self):
+        command, label = build_mapping_producer(
+            ["chunk1.bam", "chunk2.bam"],
+            False,
+            "umi",
+            "python3",
+            "stream_corrector.py",
+            "binning.tsv",
+            "ids.tsv",
+            "samtools",
+        )
+        self.assertEqual(command, ["samtools", "cat", "-o", "-", "chunk1.bam", "chunk2.bam"])
+        self.assertEqual(label, "samtools cat")
+
+    def test_raw_chunks_still_use_streaming_corrector(self):
+        command, label = build_mapping_producer(
+            ["chunk.raw.tagged.bam"],
+            True,
+            "internal",
+            "python3",
+            "stream_corrector.py",
+            "binning.tsv",
+            "ids.tsv",
+            "samtools",
+        )
+        self.assertEqual(command[0:2], ["python3", "stream_corrector.py"])
+        self.assertIn("internal", command)
+        self.assertEqual(label, "stream_corrector")
 
     def test_build_star_misc_base_skips_overhang_when_index_has_sjdb(self):
         misc = build_star_misc_base(

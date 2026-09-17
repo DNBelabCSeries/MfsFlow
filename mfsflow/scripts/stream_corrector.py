@@ -81,11 +81,11 @@ def main():
 
             # Initialize output using header from first file
             # Output BAM (binary) to stdout; STAR reads it via --readFilesCommand samtools view.
-            # Binary BAM avoids the ~30% SAM text serialization overhead of pysam mode "w".
+            # The pipe is local: compression only adds work before samtools
+            # immediately decodes it. Keep BAM framing but disable compression.
             if outfile is None:
                 try:
-                    # Mode "wb" = BAM binary. File "-" = stdout.
-                    outfile = pysam.AlignmentFile("-", "wb", template=infile)
+                    outfile = pysam.AlignmentFile("-", "wb0", template=infile)
                 except (BrokenPipeError, IOError) as exc:
                     infile.close()
                     if isinstance(exc, BrokenPipeError) or getattr(exc, "errno", None) == 32:

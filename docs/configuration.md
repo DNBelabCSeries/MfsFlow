@@ -365,7 +365,8 @@ counting_opts:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `performance_opts.stream_bc_correction` | bool | true | Enable streaming barcode correction |
+| `performance_opts.stream_bc_correction` | bool | false | Stream barcode correction during Mapping instead of parallel pre-correction during Filtering |
+| `performance_opts.parallel_counting_postprocess` | bool | true | Process independent Internal/UMI featureCounts BAMs concurrently on platforms with `fork`; disable to reduce temporary BAM disk usage |
 | `performance_opts.tmp_root` | string | null | Temporary root directory (e.g., `/dev/shm`) |
 | `performance_opts.tool_cache` | string | null | Writable cache for bundled tools when the installed package is read-only |
 | `performance_opts.min_free_gb` | number | 5 | Minimum free disk space required before execution |
@@ -381,7 +382,8 @@ counting_opts:
 ### Example
 ```yaml
 performance_opts:
-  stream_bc_correction: true
+  stream_bc_correction: false
+  parallel_counting_postprocess: true
   tmp_root: null          # or "/dev/shm"
   tool_cache: null        # or "/path/to/writable/mfsflow-tool-cache"
   max_dge_workers: null   # or a positive integer such as 8
@@ -389,13 +391,15 @@ performance_opts:
 num_threads: 30
 ```
 
-### Streaming Barcode Correction
-When enabled (`true`):
-- Reduces intermediate file I/O
-- Uses Unix pipes for data streaming
-- Significantly faster for large datasets
+### Barcode Correction Mode
+The default (`false`) corrects chunks in parallel during Filtering, then feeds
+the corrected BAM chunks directly to STAR. This usually gives STAR a steadier
+input stream and better CPU utilisation, at the cost of additional temporary
+BAM files.
 
-**Recommendation**: Always enable unless debugging.
+Enable streaming (`true`) only when temporary disk space is constrained. It
+avoids corrected intermediate BAMs, but its single Python producer can limit
+STAR throughput on high-core hosts.
 
 ### Using `/dev/shm` for Temporary Files
 If you have sufficient RAM:
@@ -532,7 +536,7 @@ counting_opts:
   Ham_Dist: 1
   twoPass: no
 performance_opts:
-  stream_bc_correction: true
+  stream_bc_correction: false
   tmp_root: null
 make_stats: yes
 make_h5ad: yes

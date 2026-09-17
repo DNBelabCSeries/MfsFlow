@@ -280,7 +280,7 @@ ERROR: Cannot allocate memory
    mfsflow ... --threads 10  # Reduce from 20
    ```
 
-2. **Use streaming mode** (already default):
+2. **Use streaming mode to reduce temporary disk use**:
    ```yaml
    performance_opts:
      stream_bc_correction: true
@@ -428,7 +428,7 @@ ERROR: Output directory already exists: /path/to/output
 **Solution**:
 1. **Reduce thread count** (see above)
 
-2. **Use streaming mode**:
+2. **Use streaming mode when memory or temporary disk pressure is more important than mapping speed**:
    ```yaml
    performance_opts:
      stream_bc_correction: true

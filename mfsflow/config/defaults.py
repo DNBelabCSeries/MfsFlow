@@ -67,7 +67,11 @@ DEFAULT_CONFIG = {
         "gene_body_sample_seed": 42
     },
     "performance_opts": {
-        "stream_bc_correction": True,
+        # Parallel pre-correction lets STAR consume corrected BAM chunks
+        # directly instead of waiting on one Python streaming producer.
+        "stream_bc_correction": False,
+        # Process independent Internal/UMI featureCounts BAMs concurrently.
+        "parallel_counting_postprocess": True,
         "tmp_root": None,
         "tool_cache": None,
         "min_free_gb": 5,

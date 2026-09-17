@@ -17,6 +17,7 @@ import collections
 import gzip
 import glob
 import hashlib
+import multiprocessing
 import tempfile
 import time
 from functools import lru_cache
@@ -1358,6 +1359,200 @@ def process_bam_and_calculate_stats(
     )
     return read_stats, cov_arr, cov_count
 
+
+def _config_bool(value, default=False):
+    """Parse YAML-compatible boolean values without treating "no" as true."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _parallel_postprocess_supported():
+    """Return whether FC-BAM workers can share read-only indexes via fork."""
+    try:
+        return "fork" in multiprocessing.get_all_start_methods()
+    except (AttributeError, RuntimeError):
+        return False
+
+
+def _postprocess_fc_bam_worker(
+    input_bam,
+    output_bam,
+    result_json,
+    samtools_exec,
+    io_threads,
+    gene_map,
+    source_label,
+    gene_models,
+    collect_coverage,
+    intron_index,
+    intron_starts,
+    strand_mode,
+    coverage_sample_fraction,
+    coverage_sample_seed,
+):
+    """Process one independent FC-BAM and publish its compact statistics."""
+    try:
+        read_stats, coverage, coverage_reads = process_bam_and_calculate_stats(
+            input_bam,
+            output_bam,
+            samtools_exec,
+            io_threads,
+            gene_map,
+            source_label=source_label,
+            gene_models=gene_models,
+            collect_coverage=collect_coverage,
+            intron_index=intron_index,
+            intron_starts=intron_starts,
+            strand_mode=strand_mode,
+            coverage_sample_fraction=coverage_sample_fraction,
+            coverage_sample_seed=coverage_sample_seed,
+        )
+        with open(result_json, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "read_stats": read_stats,
+                    "coverage": coverage,
+                    "coverage_reads": coverage_reads,
+                },
+                handle,
+            )
+    except BaseException:
+        for path in (output_bam, result_json):
+            if os.path.exists(path):
+                os.remove(path)
+        raise
+
+
+def run_parallel_fc_postprocessing(
+    fc_outputs,
+    samtools_exec,
+    total_threads,
+    gene_map,
+    gene_models,
+    collect_coverage,
+    intron_index,
+    intron_starts,
+    coverage_fractions,
+    coverage_sample_seed,
+):
+    """Process Internal and UMI FC-BAMs concurrently without changing order.
+
+    Each worker runs the same per-read implementation used by the serial path.
+    Only independent source BAMs are parallelised; the returned list follows
+    ``fc_outputs`` order so final BAM concatenation remains deterministic.
+    """
+    if len(fc_outputs) < 2:
+        raise ValueError("parallel FC-BAM processing requires at least two inputs")
+    if not _parallel_postprocess_supported():
+        raise RuntimeError("parallel FC-BAM processing requires fork support")
+
+    context = multiprocessing.get_context("fork")
+    worker_count = len(fc_outputs)
+    # Each process owns one Python core plus a BGZF reader and writer. Bound
+    # both htslib pools so two workers do not each consume the full CLI budget.
+    io_threads = max(1, (max(1, int(total_threads)) - worker_count) // (2 * worker_count))
+    jobs = []
+    started = time.perf_counter()
+    print(
+        f"Parallel FC-BAM post-processing: {worker_count} workers, "
+        f"{io_threads} BAM I/O thread(s) per reader/writer.",
+        flush=True,
+    )
+
+    try:
+        for source_label, fc_bam, strand_mode in fc_outputs:
+            processed_bam = _temporary_output_path(fc_bam, suffix=".processed.bam")
+            result_json = _temporary_output_path(fc_bam, suffix=".postprocess.json")
+            process = context.Process(
+                target=_postprocess_fc_bam_worker,
+                args=(
+                    fc_bam,
+                    processed_bam,
+                    result_json,
+                    samtools_exec,
+                    io_threads,
+                    gene_map,
+                    source_label,
+                    gene_models,
+                    collect_coverage,
+                    intron_index,
+                    intron_starts,
+                    strand_mode,
+                    coverage_fractions[source_label],
+                    coverage_sample_seed,
+                ),
+                name=f"mfsflow-fc-{source_label.lower()}",
+            )
+            jobs.append(
+                {
+                    "source": source_label,
+                    "input": fc_bam,
+                    "output": processed_bam,
+                    "result": result_json,
+                    "process": process,
+                }
+            )
+
+        for job in jobs:
+            job["process"].start()
+        for job in jobs:
+            job["process"].join()
+
+        failures = [
+            f"{job['source']} rc={job['process'].exitcode}"
+            for job in jobs
+            if job["process"].exitcode != 0
+        ]
+        if failures:
+            raise RuntimeError("FC-BAM post-processing failed: " + "; ".join(failures))
+
+        results = []
+        for job in jobs:
+            if not os.path.exists(job["output"]) or os.path.getsize(job["output"]) == 0:
+                raise RuntimeError(
+                    f"FC-BAM post-processing produced no BAM for {job['source']}: {job['output']}"
+                )
+            with open(job["result"], "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            results.append(
+                (
+                    job["source"],
+                    job["input"],
+                    job["output"],
+                    payload.get("read_stats", {}),
+                    payload.get("coverage", [0] * 100),
+                    int(payload.get("coverage_reads", 0)),
+                )
+            )
+        print(
+            f"Parallel FC-BAM post-processing finished "
+            f"({time.perf_counter() - started:.2f}s).",
+            flush=True,
+        )
+        return results
+    except BaseException:
+        for job in jobs:
+            process = job["process"]
+            if process.pid is not None and process.is_alive():
+                process.terminate()
+        for job in jobs:
+            process = job["process"]
+            if process.pid is not None:
+                process.join()
+            for key in ("output", "result"):
+                path = job[key]
+                if os.path.exists(path):
+                    os.remove(path)
+        raise
+    finally:
+        for job in jobs:
+            result_json = job["result"]
+            if os.path.exists(result_json):
+                os.remove(result_json)
+
 def split_bam_smartseq3(bam_file, threads, samtools_exec):
     print("Splitting BAM for Smart-seq3 processing (One-pass Optimized)...")
     prefix = bam_file.replace('.bam', '')
@@ -1610,22 +1805,94 @@ def main():
     except ImportError:
         pysam = None
 
+    coverage_fractions = {}
+    for source_label, fc_bam, _fc_strand_mode in fc_outputs:
+        # Summary-based estimate may include supplementary alignments because
+        # featureCounts --primary only filters FLAG 0x100. This affects sample
+        # depth, not the deterministic per-read classification below.
+        mapped_for_cov = (
+            primary_mapped_for_coverage(fc_bam, samtools_exec, read_layout)
+            if collect_coverage else 0
+        )
+        cov_fraction = coverage_sampling_fraction(mapped_for_cov, gene_body_max_reads)
+        coverage_fractions[source_label] = cov_fraction
+        print(
+            f"Gene body coverage sampling ({source_label}): "
+            f"mapped={mapped_for_cov}, fraction={cov_fraction:.6f}"
+        )
+
+    performance_opts = config.get("performance_opts", {}) or {}
+    parallel_postprocess = _config_bool(
+        performance_opts.get("parallel_counting_postprocess"),
+        default=True,
+    )
+    use_parallel_postprocess = bool(
+        parallel_postprocess
+        and pysam is not None
+        and len(fc_outputs) > 1
+        and num_threads >= 4
+        and _parallel_postprocess_supported()
+    )
+
     staged_final_bam = _temporary_output_path(final_bam, suffix=".tmp.bam")
     try:
-        if pysam is not None:
+        if use_parallel_postprocess:
+            parallel_results = run_parallel_fc_postprocessing(
+                fc_outputs,
+                samtools_exec,
+                num_threads,
+                gene_map,
+                gene_models,
+                collect_coverage,
+                intron_index,
+                intron_starts,
+                coverage_fractions,
+                gene_body_sample_seed,
+            )
+            processed_bams = [result[2] for result in parallel_results]
+            try:
+                print(
+                    f"Concatenating {len(processed_bams)} processed FC-BAMs "
+                    f"in source order...",
+                    flush=True,
+                )
+                subprocess.check_call(
+                    [
+                        samtools_exec,
+                        "cat",
+                        "-@",
+                        str(max(1, num_threads)),
+                        "-o",
+                        staged_final_bam,
+                    ] + processed_bams
+                )
+
+                for source_label, _fc_bam, _processed_bam, r_stats, cov, cov_reads in parallel_results:
+                    merge_stats(total_read_stats, r_stats)
+                    if source_label == "UMI":
+                        merge_coverage(total_cov_umi, cov)
+                        total_cov_umi_reads += cov_reads
+                        total_cov_umi_fraction = coverage_fractions[source_label]
+                    else:
+                        merge_coverage(total_cov_int, cov)
+                        total_cov_int_reads += cov_reads
+                        total_cov_int_fraction = coverage_fractions[source_label]
+            finally:
+                for processed_bam in processed_bams:
+                    if os.path.exists(processed_bam):
+                        os.remove(processed_bam)
+        elif pysam is not None:
+            if parallel_postprocess and len(fc_outputs) > 1:
+                print(
+                    "Parallel FC-BAM post-processing unavailable; using the "
+                    "serial order-preserving path.",
+                    flush=True,
+                )
             print(f"Writing final GeneTagged BAM directly: {staged_final_bam}")
             with pysam.AlignmentFile(fc_outputs[0][1], "rb", threads=int(num_threads)) as template_in:
                 with pysam.AlignmentFile(staged_final_bam, "wb", template=template_in, threads=int(num_threads)) as final_out:
                     for source_label, fc_bam, fc_strand_mode in fc_outputs:
-                        # Summary-based estimate: may overcount supplementary alignments
-                        # (featureCounts --primary does not filter FLAG 0x800). Affects
-                        # coverage sampling depth, not bias direction. See docstring.
-                        mapped_for_cov = primary_mapped_for_coverage(fc_bam, samtools_exec, read_layout) if collect_coverage else 0
-                        cov_fraction = coverage_sampling_fraction(mapped_for_cov, gene_body_max_reads)
-                        print(
-                            f"Gene body coverage sampling ({source_label}): "
-                            f"mapped={mapped_for_cov}, fraction={cov_fraction:.6f}"
-                        )
+                        cov_fraction = coverage_fractions[source_label]
                         r_stats, cov, cov_reads = process_bam_and_calculate_stats(
                             fc_bam, staged_final_bam, samtools_exec, num_threads,
                             gene_map, source_label=source_label, gene_models=gene_models,
@@ -1644,21 +1911,12 @@ def main():
                             merge_coverage(total_cov_int, cov)
                             total_cov_int_reads += cov_reads
                             total_cov_int_fraction = cov_fraction
-                        os.remove(fc_bam)
         else:
             print("pysam unavailable for direct final BAM writing; falling back to intermediate BAM merge.")
             bams_to_merge = []
             for source_label, fc_bam, fc_strand_mode in fc_outputs:
                 processed_bam = fc_bam + ".processed.bam"
-                # Summary-based estimate: may overcount supplementary alignments
-                # (featureCounts --primary does not filter FLAG 0x800). Affects
-                # coverage sampling depth, not bias direction. See docstring.
-                mapped_for_cov = primary_mapped_for_coverage(fc_bam, samtools_exec, read_layout) if collect_coverage else 0
-                cov_fraction = coverage_sampling_fraction(mapped_for_cov, gene_body_max_reads)
-                print(
-                    f"Gene body coverage sampling ({source_label}): "
-                    f"mapped={mapped_for_cov}, fraction={cov_fraction:.6f}"
-                )
+                cov_fraction = coverage_fractions[source_label]
                 r_stats, cov, cov_reads = process_bam_and_calculate_stats(
                     fc_bam, processed_bam, samtools_exec, num_threads,
                     gene_map, source_label=source_label, gene_models=gene_models,
@@ -1677,7 +1935,6 @@ def main():
                     merge_coverage(total_cov_int, cov)
                     total_cov_int_reads += cov_reads
                     total_cov_int_fraction = cov_fraction
-                os.remove(fc_bam)
                 bams_to_merge.append(processed_bam)
 
             if len(bams_to_merge) == 1:

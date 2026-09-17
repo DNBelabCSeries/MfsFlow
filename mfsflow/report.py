@@ -1139,6 +1139,11 @@ def _build_config_summary_html(config):
     ]
     performance_rows = [
         ("Streaming BC correction", performance.get("stream_bc_correction"), {}),
+        (
+            "Parallel counting post-process",
+            performance.get("parallel_counting_postprocess"),
+            {},
+        ),
         ("Maximum DGE workers", performance.get("max_dge_workers"), {}),
         ("Minimum free disk", performance.get("min_free_gb"), {}),
         ("Disk multiplier", performance.get("disk_space_multiplier"), {}),

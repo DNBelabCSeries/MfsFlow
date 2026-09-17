@@ -172,13 +172,23 @@ def star_index_has_embedded_sjdb(index_params):
     return bool(overhang and overhang not in ("-", "None", "0"))
 
 
-def build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, read_len, samtools):
+def build_star_misc_base(
+    star_index,
+    num_threads,
+    read_layout,
+    index_has_sjdb,
+    final_gtf,
+    read_len,
+    samtools,
+    samtools_threads=1,
+):
+    samtools_threads = max(1, int(samtools_threads))
     misc_parts = [
         "--genomeDir", star_index,
         "--runThreadN", str(num_threads),
         "--readFilesType", "SAM", read_layout,
         # stream_corrector.py outputs BAM (binary); samtools view decodes it for STAR.
-        "--readFilesCommand", shlex.join([samtools, "view"]),
+        "--readFilesCommand", shlex.join([samtools, "view", "-@", str(samtools_threads)]),
         "--outSAMmultNmax", "1",
         "--outFilterMultimapNmax", "50",
         "--outSAMunmapped", "Within",
@@ -265,19 +275,32 @@ def setup_gtf(config, project, out_dir, samtools):
             
     return final_gtf, ""
 
-def run_star_pipe(corrector_args, star_args, timeout=None):
+def run_star_pipe(producer_args, star_args, timeout=None, producer_name="stream_corrector"):
     """
-    Runs a pipeline: Corrector (Python) -> STAR
+    Runs a pipeline: input producer -> STAR.
+
+    The producer is either the Python streaming barcode corrector (raw tagged
+    BAMs) or ``samtools cat`` (already corrected BAMs).
 
     ``timeout`` (seconds) bounds the total wait; None waits indefinitely,
     matching the historical behaviour. Configure it via
     ``performance_opts.mapping_timeout_sec`` to guard against a hung STAR.
     """
-    print(f"Starting Pipeline: {shlex.join(corrector_args[:3])}... -> STAR")
+    print(f"Starting Pipeline: {shlex.join(producer_args[:3])}... -> STAR")
+    print(f"STAR command: {shlex.join(star_args)}", flush=True)
+    try:
+        allowed_cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        allowed_cpus = None
+    if allowed_cpus is not None:
+        print(
+            f"STAR thread request/CPU affinity: "
+            f"{_star_thread_request(star_args)}/{allowed_cpus}",
+            flush=True,
+        )
 
-    # Start Producer (Corrector)
-    # Use list args to avoid shell quoting issues with many files
-    p1 = subprocess.Popen(corrector_args, stdout=subprocess.PIPE)
+    # Start the argv-based producer without shell interpolation.
+    p1 = subprocess.Popen(producer_args, stdout=subprocess.PIPE)
 
     # Start Consumer (STAR). argv form keeps paths and user arguments isolated.
     try:
@@ -311,7 +334,7 @@ def run_star_pipe(corrector_args, star_args, timeout=None):
         for proc in (p2, p1):
             proc.wait()
         raise RuntimeError(
-            f"Mapping stream timed out after {timeout}s (STAR/stream_corrector killed). "
+            f"Mapping stream timed out after {timeout}s (STAR/{producer_name} killed). "
             "Consider raising performance_opts.mapping_timeout_sec."
         )
     
@@ -319,9 +342,48 @@ def run_star_pipe(corrector_args, star_args, timeout=None):
     if p2.returncode != 0:
         failures.append(f"STAR exited with code {p2.returncode}")
     if p1.returncode != 0:
-        failures.append(f"stream_corrector exited with code {p1.returncode}")
+        failures.append(f"{producer_name} exited with code {p1.returncode}")
     if failures:
         raise RuntimeError("Mapping stream failed: " + "; ".join(failures))
+
+
+def _star_thread_request(star_args):
+    """Return STAR's requested worker count for diagnostics."""
+    try:
+        index = star_args.index("--runThreadN")
+        return int(star_args[index + 1])
+    except (ValueError, IndexError, TypeError):
+        return "unknown"
+
+
+def build_mapping_producer(
+    bam_files,
+    streams_raw_chunks,
+    target_type,
+    python_exec,
+    corrector_script,
+    bc_bin_file,
+    expect_id_file,
+    samtools,
+):
+    """Build the raw-correction or pre-corrected BAM input producer."""
+    bam_files = list(bam_files)
+    if streams_raw_chunks:
+        return (
+            [
+                python_exec,
+                corrector_script,
+                "--binning", bc_bin_file,
+                "--idmap", expect_id_file,
+                "--type", target_type,
+            ] + bam_files,
+            "stream_corrector",
+        )
+
+    # Filtering already split reads into UMI/internal BAMs and assigned CC/CB.
+    # Concatenating their BGZF blocks is much cheaper than decoding and
+    # serializing every record through Python a second time.
+    return [samtools, "cat", "-o", "-"] + bam_files, "samtools cat"
 
 def main():
     import argparse
@@ -395,12 +457,17 @@ def main():
     if not os.path.exists(bc_bin_file):
         bc_bin_file = os.devnull
 
-    streams_raw_chunks = any(os.path.basename(x).endswith(".raw.tagged.bam") for x in (umi_bams + internal_bams))
+    umi_streams_raw_chunks = any(
+        os.path.basename(path).endswith(".raw.tagged.bam") for path in umi_bams
+    )
+    internal_streams_raw_chunks = any(
+        os.path.basename(path).endswith(".raw.tagged.bam") for path in internal_bams
+    )
     length_started = time.perf_counter()
     umi_read_len = determine_target_read_length(
         umi_bams,
         "umi",
-        streams_raw_chunks,
+        umi_streams_raw_chunks,
         bc_bin_file,
         expect_id_file,
         samtools,
@@ -408,7 +475,7 @@ def main():
     internal_read_len = determine_target_read_length(
         internal_bams,
         "internal",
-        streams_raw_chunks,
+        internal_streams_raw_chunks,
         bc_bin_file,
         expect_id_file,
         samtools,
@@ -429,6 +496,7 @@ def main():
 
     # 4. Resource Allocation
     print(f"Allocating {num_threads} threads for sequential execution.")
+    samtools_view_threads = max(1, min(4, num_threads // 4))
 
     raw_mapping_timeout = (config.get('performance_opts', {}) or {}).get('mapping_timeout_sec')
     if raw_mapping_timeout in (None, "", 0, "0"):
@@ -455,13 +523,29 @@ def main():
     # Run UMI
     if umi_bams:
         prefix_umi = os.path.join(out_dir, f"{project}.filtered.tagged.umi.")
-        
-        # Corrector Args (Producer)
-        corrector_args = [sys.executable or 'python3', corrector_script, '--binning', bc_bin_file, '--idmap', expect_id_file, '--type', 'umi'] + umi_bams
+        producer_args, producer_name = build_mapping_producer(
+            umi_bams,
+            umi_streams_raw_chunks,
+            "umi",
+            sys.executable or "python3",
+            corrector_script,
+            bc_bin_file,
+            expect_id_file,
+            samtools,
+        )
         
         # STAR Command (Consumer)
         # --readFilesIn /dev/stdin
-        misc_base = build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, umi_read_len, samtools)
+        misc_base = build_star_misc_base(
+            star_index,
+            num_threads,
+            read_layout,
+            index_has_sjdb,
+            final_gtf,
+            umi_read_len,
+            samtools,
+            samtools_view_threads,
+        )
         cmd_umi = build_star_command(
             star_exec,
             misc_base,
@@ -471,19 +555,40 @@ def main():
         )
         
         star_started = time.perf_counter()
-        run_star_pipe(corrector_args, cmd_umi, timeout=mapping_timeout)
-        print(f"Mapping timing: UMI correction + STAR ({time.perf_counter() - star_started:.2f}s)", flush=True)
+        run_star_pipe(
+            producer_args,
+            cmd_umi,
+            timeout=mapping_timeout,
+            producer_name=producer_name,
+        )
+        print(f"Mapping timing: UMI input + STAR ({time.perf_counter() - star_started:.2f}s)", flush=True)
         print("STAR UMI finished.")
 
     # Run Internal
     if internal_bams:
         prefix_int = os.path.join(out_dir, f"{project}.filtered.tagged.internal.")
-        
-        # Corrector Args
-        corrector_args = [sys.executable or 'python3', corrector_script, '--binning', bc_bin_file, '--idmap', expect_id_file, '--type', 'internal'] + internal_bams
+        producer_args, producer_name = build_mapping_producer(
+            internal_bams,
+            internal_streams_raw_chunks,
+            "internal",
+            sys.executable or "python3",
+            corrector_script,
+            bc_bin_file,
+            expect_id_file,
+            samtools,
+        )
         
         # STAR Command
-        misc_base = build_star_misc_base(star_index, num_threads, read_layout, index_has_sjdb, final_gtf, internal_read_len, samtools)
+        misc_base = build_star_misc_base(
+            star_index,
+            num_threads,
+            read_layout,
+            index_has_sjdb,
+            final_gtf,
+            internal_read_len,
+            samtools,
+            samtools_view_threads,
+        )
         cmd_int = build_star_command(
             star_exec,
             misc_base,
@@ -493,8 +598,13 @@ def main():
         )
         
         star_started = time.perf_counter()
-        run_star_pipe(corrector_args, cmd_int, timeout=mapping_timeout)
-        print(f"Mapping timing: Internal correction + STAR ({time.perf_counter() - star_started:.2f}s)", flush=True)
+        run_star_pipe(
+            producer_args,
+            cmd_int,
+            timeout=mapping_timeout,
+            producer_name=producer_name,
+        )
+        print(f"Mapping timing: Internal input + STAR ({time.perf_counter() - star_started:.2f}s)", flush=True)
         print("STAR Internal finished.")
         
 

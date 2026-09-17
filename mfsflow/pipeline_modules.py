@@ -19,6 +19,37 @@ from mfsflow.path_layout import stats_dir
 
 logger = logging.getLogger(__name__)
 
+
+def _split_job_budget(n_threads, input_files, *, paired=False, use_seqkit=False):
+    """Estimate concurrent split jobs from the backend and stream count."""
+    n_threads = max(1, int(n_threads))
+
+    # SeqKit receives an explicit per-job thread count below, so scheduling up
+    # to one job per available CPU remains bounded for both SE and PE input.
+    if use_seqkit:
+        return n_threads
+
+    has_compressed_input = any(
+        str(path).lower().endswith(".gz") for path in (input_files or [])
+    )
+
+    # GNU PE fallback starts the R1 and R2 pipelines concurrently. Treat those
+    # two streams as the job's minimum CPU cost even for plain FASTQ. For SE,
+    # reserve a second worker only when decompression is required.
+    threads_per_job = 2 if paired or has_compressed_input else 1
+    return max(1, n_threads // threads_per_job)
+
+
+def _parallel_pair_command(command1, command2):
+    """Run both mate split commands concurrently and preserve either failure."""
+    return (
+        f"({command1}) & mfsflow_r1=$!; "
+        f"({command2}) & mfsflow_r2=$!; "
+        f"wait $mfsflow_r1; mfsflow_s1=$?; "
+        f"wait $mfsflow_r2; mfsflow_s2=$?; "
+        f"[ \"$mfsflow_s1\" -eq 0 ] && [ \"$mfsflow_s2\" -eq 0 ]"
+    )
+
 def run_shell_cmd(cmd, step_name, log_file=None):
     """Execute a shell command with logging and error handling.
     
@@ -94,16 +125,27 @@ def split_fastq(
     elif shutil.which(seqkit_exec):
         has_seqkit = True
     
-    # Check if files are gzipped
-    is_gzipped = fq_files[0].endswith('.gz')
-    
+    mode = "SE"
+    if fq2_files and len(fq2_files) > 0:
+        mode = "PE"
+        if len(fq_files) != len(fq2_files):
+            raise ValueError(
+                f"Mismatch in R1/R2 file counts: {len(fq_files)} vs {len(fq2_files)}"
+            )
+
     split_parts = max(1, int(split_parts or n_threads))
 
-    # Determine concurrency
-    # We want to run multiple split jobs in parallel if we have multiple files
-    # Each job consumes some threads (pigz -dc + split + pigz).
-    # Approx 3 threads per job if gzipped.
-    max_jobs = max(1, n_threads // 3)
+    # Determine concurrency from the actual input format. A compressed input
+    # needs an additional decompression worker, while an uncompressed input
+    # can use one splitter process per CPU. The old fixed ``// 3`` budget was
+    # unnecessarily conservative for plain FASTQ and for SeqKit.
+    all_input_files = list(fq_files) + list(fq2_files or [])
+    max_jobs = _split_job_budget(
+        n_threads,
+        all_input_files,
+        paired=mode == "PE",
+        use_seqkit=has_seqkit,
+    )
     
     # Adjust threads per job based on ACTUAL number of files we process
     num_concurrent_jobs = min(len(fq_files), max_jobs)
@@ -112,12 +154,6 @@ def split_fastq(
     import time
     
     jobs = []
-    
-    mode = "SE"
-    if fq2_files and len(fq2_files) > 0:
-        mode = "PE"
-        if len(fq_files) != len(fq2_files):
-             raise ValueError(f"Mismatch in R1/R2 file counts: {len(fq_files)} vs {len(fq2_files)}")
     
     logger.info(
         f"Splitting {len(fq_files)} files ({mode}). "
@@ -174,7 +210,9 @@ def split_fastq(
             # keeps downstream fqfilter parallelism balanced without producing
             # excessive temporary FASTQ chunks.
 
-            # Distribute threads among concurrent jobs
+            # Distribute threads among concurrent jobs. With one input pair,
+            # SeqKit receives the full requested thread budget; with multiple
+            # inputs the budget is divided across active jobs.
             seqkit_threads = max(1, n_threads // num_concurrent_jobs)
 
             seqkit_cmd = shlex.quote(seqkit_exec) if os.path.exists(seqkit_exec) else seqkit_exec
@@ -193,19 +231,23 @@ def split_fastq(
         else:
             # GNU split Fallback
             pigz_q = shlex.quote(str(pigz_exec))
-            pigz_threads = max(1, n_threads // num_concurrent_jobs // 2) 
+            input1_gzipped = str(fpath1).lower().endswith('.gz')
+            input2_gzipped = bool(fpath2 and str(fpath2).lower().endswith('.gz'))
+            compressed_streams = int(input1_gzipped) + int(input2_gzipped)
+            pigz_threads = max(
+                1,
+                n_threads // num_concurrent_jobs // max(1, compressed_streams),
+            )
             
             output_ext = ".gz" if compress_chunks else ""
             
             if mode == "PE":
-                # PE Split with GNU split is hard to sync perfectly if we run separate processes.
-                # But since we used calculated line counts, it SHOULD match.
-                # We will run two commands in parallel? Or sequential?
-                # To avoid desync issues if one fails, sequential is safer but slower.
-                # We can chain them.
+                # The two mates are independent streams with the same record
+                # boundary. Run both split pipelines concurrently and wait for
+                # both statuses, so a failed mate cannot be hidden.
                 
                 # R1
-                dc1 = f"{pigz_q} -p {pigz_threads} -dc {shlex.quote(fpath1)}" if is_gzipped else f"cat {shlex.quote(fpath1)}"
+                dc1 = f"{pigz_q} -p {pigz_threads} -dc {shlex.quote(fpath1)}" if input1_gzipped else f"cat {shlex.quote(fpath1)}"
                 
                 if compress_chunks:
                     cmp1 = f"{pigz_q} -p {pigz_threads} > $FILE.gz"
@@ -217,7 +259,7 @@ def split_fastq(
                 cmd1 = f"{dc1} | split -l {lines_per_chunk} --filter='{cmp1}' - {shlex.quote(prefix1)}"
                 
                 # R2
-                dc2 = f"{pigz_q} -p {pigz_threads} -dc {shlex.quote(fpath2)}" if is_gzipped else f"cat {shlex.quote(fpath2)}"
+                dc2 = f"{pigz_q} -p {pigz_threads} -dc {shlex.quote(fpath2)}" if input2_gzipped else f"cat {shlex.quote(fpath2)}"
                 
                 if compress_chunks:
                     cmp2 = f"{pigz_q} -p {pigz_threads} > $FILE.gz"
@@ -227,9 +269,9 @@ def split_fastq(
                 prefix2 = f"{split_prefix}R2."
                 cmd2 = f"{dc2} | split -l {lines_per_chunk} --filter='{cmp2}' - {shlex.quote(prefix2)}"
                 
-                cmd = f"{cmd1} && {cmd2}"
+                cmd = _parallel_pair_command(cmd1, cmd2)
             else:
-                decompress_cmd = f"{pigz_q} -p {pigz_threads} -dc {shlex.quote(fpath1)}" if is_gzipped else f"cat {shlex.quote(fpath1)}"
+                decompress_cmd = f"{pigz_q} -p {pigz_threads} -dc {shlex.quote(fpath1)}" if input1_gzipped else f"cat {shlex.quote(fpath1)}"
                 
                 if compress_chunks:
                      compress_cmd = f"{pigz_q} -p {pigz_threads} > $FILE.gz"
@@ -253,6 +295,7 @@ def split_fastq(
 
     # Execute Jobs
     active_procs = []
+    bash_exec = shutil.which("bash")
     
     def start_job(job_idx):
         job = jobs[job_idx]
@@ -260,7 +303,19 @@ def split_fastq(
         if job['mode'] == "PE":
             name += f" & {os.path.basename(job['file2'])}"
         logger.info(f"  [Split {job_idx+1}/{len(jobs)}] {name}")
-        p = subprocess.Popen(job['cmd'], shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        command = job['cmd']
+        popen_kwargs = {}
+        if bash_exec:
+            # Preserve decompressor failures on the left side of a pipeline.
+            command = f"set -o pipefail; {command}"
+            popen_kwargs["executable"] = bash_exec
+        p = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **popen_kwargs,
+        )
         return p
 
     next_job_idx = 0
@@ -291,7 +346,9 @@ def split_fastq(
             raise RuntimeError(f"Split command failed with rc={failure}")
         active_procs = still_active
         if active_procs:
-            time.sleep(0.5)
+            # Avoid visible gaps between short splitting jobs, especially for
+            # many small samplesheet files.
+            time.sleep(0.05)
 
     # Post-process filenames to match fqfilter expectations
     # fqfilter expects: {original_base}{suffix}.gz

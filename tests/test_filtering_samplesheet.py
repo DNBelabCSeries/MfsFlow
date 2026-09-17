@@ -21,11 +21,46 @@ class _Timer:
 class _Proc:
     returncode = 0
 
+    def poll(self):
+        return self.returncode
+
     def wait(self):
         return None
 
 
 class FilteringSamplesheetTests(unittest.TestCase):
+    def test_direct_group_jobs_use_plain_fastq_cores_without_oversubscribing_gzip(self):
+        plain = [
+            {"read1": f"r1_{index}.fq", "read2": f"r2_{index}.fq"}
+            for index in range(50)
+        ]
+        compressed = [
+            {"read1": f"r1_{index}.fq.gz", "read2": f"r2_{index}.fq.gz"}
+            for index in range(50)
+        ]
+        self.assertEqual(filtering._recommended_direct_group_jobs(plain, 20), 20)
+        self.assertEqual(filtering._recommended_direct_group_jobs(compressed, 20), 6)
+
+    def test_completed_chunk_frees_slot_before_slow_first_chunk(self):
+        slow = mock.Mock()
+        slow.poll.return_value = None
+        finished = mock.Mock()
+        finished.poll.return_value = 0
+        processes = [slow, finished]
+        filtering._wait_for_filter_slot(processes, "pipeline.log")
+        self.assertEqual(processes, [slow])
+        slow.wait.assert_not_called()
+        finished.wait.assert_called_once()
+
+    def test_failed_chunk_is_reported_without_waiting_for_first_chunk(self):
+        slow = mock.Mock()
+        slow.poll.return_value = None
+        failed = mock.Mock()
+        failed.poll.return_value = 2
+        with self.assertRaisesRegex(RuntimeError, "rc=2"):
+            filtering._wait_for_filter_slot([slow, failed], "pipeline.log")
+        slow.wait.assert_not_called()
+
     def test_filtering_rerun_removes_stale_tmp_and_barcode_outputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             analysis_dir = os.path.join(tmpdir, "XPRESS_PROCESSING")
@@ -178,10 +213,10 @@ class FilteringSamplesheetTests(unittest.TestCase):
                 umi_chunks, int_chunks = filtering.run_filtering_stage(runtime, _Timer(), mock.Mock(), run_log)
 
             split_fastq.assert_not_called()
-            self.assertEqual(2, len(launched))
+            self.assertEqual(6, len(launched))
             self.assertTrue(all("--direct-fastq" in cmd for cmd in launched))
             self.assertEqual(umi_chunks, int_chunks)
-            self.assertEqual(2, len(umi_chunks))
+            self.assertEqual(6, len(umi_chunks))
 
 
 if __name__ == "__main__":

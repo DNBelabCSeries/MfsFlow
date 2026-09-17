@@ -16,6 +16,7 @@ from collections import defaultdict, Counter
 import multiprocessing
 import json
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 try:
     import pysam
@@ -28,7 +29,7 @@ try:
     from mfsflow.scripts.dge_utils import (
         balance_reference_chunks,
         close_pass1_store,
-        dynamic_chunksize,
+        bounded_results,
         finalize_pass1_store,
         load_pass1_read_bundle,
         load_pass1_umi_bundle,
@@ -48,7 +49,7 @@ except ImportError:
     from dge_utils import (
         balance_reference_chunks,
         close_pass1_store,
-        dynamic_chunksize,
+        bounded_results,
         finalize_pass1_store,
         load_pass1_read_bundle,
         load_pass1_umi_bundle,
@@ -637,8 +638,8 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
                 f"DGE counting returned {completed_chunks}/{expected_chunks} chromosome chunks."
             )
         # The pass-1 store is private to this process.  Committing once avoids
-        # one transaction/fsync boundary per chromosome chunk, which is costly
-        # on network-backed temporary directories.
+        # one transaction boundary per chromosome chunk. Synchronous writes
+        # are disabled for this disposable store.
         pass1_store_conn.commit()
         finalize_pass1_store(pass1_store_conn)
         log_phase(f"Pass 1 counting ({completed_chunks} chunks)", pass1_started)
@@ -668,63 +669,43 @@ def process_bam_and_matrix(bam_file, out_bam, config, threads, samtools_exec=Non
         print(
             f"Clustering UMIs for {total_bcs} barcodes using {cluster_workers} workers "
             f"(Ham_Dist={ham_dist}, correction_map={'on' if need_correction_map else 'off'}, "
-            f"saturation={'on' if collect_global_umis else 'off'}, dynamic chunksize)..."
+            f"saturation={'on' if collect_global_umis else 'off'}, bounded scheduling)..."
         )
         
         correction_map = defaultdict(lambda: defaultdict(dict)) if need_correction_map else {}
 
-        # Submit bounded batches so completed raw UMI maps can be released
-        # before the next batch is queued. This keeps the parent-process peak
-        # bounded without changing the per-barcode clustering result.
-        cluster_batch_size = max(8, min(64, cluster_workers * 4))
+        # Load payloads in the parent (SQLite connection owner), only when a
+        # task slot is available. A slow well no longer stalls the next batch.
+        max_pending = max(1, min(64, cluster_workers * 2))
         processed_bcs = 0
         clustering_started = time.perf_counter()
-        with multiprocessing.Pool(cluster_workers) as pool:
-            for batch_start in range(0, total_bcs, cluster_batch_size):
-                batch_bcs = cluster_barcodes[batch_start:batch_start + cluster_batch_size]
-                batch_args = []
-                for bc in batch_bcs:
-                    umi_bundle, global_counts = load_pass1_umi_bundle(
-                        pass1_store_conn,
-                        bc,
-                        include_global=collect_global_umis,
-                    )
-                    batch_args.append(
-                        (
-                            bc,
-                            umi_bundle["exon"],
-                            umi_bundle["intron"],
-                            global_counts if collect_global_umis else {},
-                            ham_dist,
-                            need_correction_map,
-                            collect_global_umis,
-                            collect_global_umis,
-                        )
-                    )
-                batch_chunksize = dynamic_chunksize(len(batch_bcs), cluster_workers)
-                for res in pool.imap_unordered(
-                    cluster_with_global,
-                    batch_args,
-                    chunksize=batch_chunksize,
-                ):
-                    processed_bcs += 1
-                    if processed_bcs % 100 == 0 or processed_bcs == total_bcs:
-                        print(f"Clustering {processed_bcs}/{total_bcs}...", end='\r')
 
-                    bc, c_ex, c_in, c_inex, corr, g_dist, gene_dist = res
+        def clustering_arguments():
+            for bc in cluster_barcodes:
+                umi_bundle, global_counts = load_pass1_umi_bundle(
+                    pass1_store_conn, bc, include_global=collect_global_umis,
+                )
+                yield (
+                    bc, umi_bundle["exon"], umi_bundle["intron"],
+                    global_counts if collect_global_umis else {}, ham_dist,
+                    need_correction_map, collect_global_umis, collect_global_umis,
+                )
 
-                    if c_ex: final_umi_counts['exon'][bc].update(c_ex)
-                    if c_in: final_umi_counts['intron'][bc].update(c_in)
-                    if c_inex: final_umi_counts['inex'][bc].update(c_inex)
-                    if need_correction_map and corr:
-                        correction_map[bc].update(corr)
-                    if collect_global_umis and g_dist:
-                        global_umi_freq.update(g_dist)
-                    if collect_global_umis and gene_dist:
-                        gene_umi_freq.update(gene_dist)
-
-                del batch_args
-                del batch_bcs
+        with ProcessPoolExecutor(max_workers=cluster_workers) as pool:
+            for res in bounded_results(pool, cluster_with_global, clustering_arguments(), max_pending):
+                processed_bcs += 1
+                if processed_bcs % 100 == 0 or processed_bcs == total_bcs:
+                    print(f"Clustering {processed_bcs}/{total_bcs}...", end='\r')
+                bc, c_ex, c_in, c_inex, corr, g_dist, gene_dist = res
+                if c_ex: final_umi_counts['exon'][bc].update(c_ex)
+                if c_in: final_umi_counts['intron'][bc].update(c_in)
+                if c_inex: final_umi_counts['inex'][bc].update(c_inex)
+                if need_correction_map and corr:
+                    correction_map[bc].update(corr)
+                if collect_global_umis and g_dist:
+                    global_umi_freq.update(g_dist)
+                if collect_global_umis and gene_dist:
+                    gene_umi_freq.update(gene_dist)
         log_phase(f"UMI clustering ({processed_bcs} barcodes)", clustering_started)
 
         # Keep the store open until read matrices are rebuilt below.  Delaying

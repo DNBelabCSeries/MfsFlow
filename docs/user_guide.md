@@ -386,7 +386,7 @@ and options used for that run. The current CLI does not accept a separate
 
 1. **Increase threads**: Use `--threads` to specify more CPU cores
 2. **Use fast storage**: SSD or RAM-backed storage for intermediate files
-3. **Enable streaming**: Set `stream_bc_correction: true` in config
+3. **Use parallel pre-correction**: Keep `stream_bc_correction: false` for better STAR utilisation; enable streaming only when temporary disk space is limited
 4. **Adjust downsampling**: Modify downsampling levels based on your needs
 
 ### Troubleshooting

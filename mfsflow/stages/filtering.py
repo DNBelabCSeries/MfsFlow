@@ -13,12 +13,64 @@ import math
 import os
 import shutil
 import subprocess
+import time
 
 from mfsflow import pipeline_modules
 from mfsflow.bootstrap import run_barcode_discovery
 from mfsflow.config import persist_run_config
 from mfsflow.logging_utils import log_info
 from mfsflow.path_layout import barcode_dir, config_dir
+
+
+def _wait_for_process_slot(processes, log_path, stage_name):
+    """Reap whichever child finishes first, leaving slower children running."""
+    while processes:
+        for index, proc in enumerate(processes):
+            code = proc.poll()
+            if code is not None:
+                proc.wait()
+                processes.pop(index)
+                if code != 0:
+                    raise RuntimeError(f"{stage_name} failed (rc={code}). Check {log_path} for details.")
+                return
+        time.sleep(0.05)
+
+
+def _wait_for_filter_slot(processes, log_path):
+    """Backward-compatible wrapper for fqfilter scheduling tests/callers."""
+    return _wait_for_process_slot(processes, log_path, "fqfilter")
+
+
+def _recommended_direct_group_jobs(groups, num_threads):
+    """Return a CPU-aware batch count for samplesheet FASTQ groups.
+
+    A plain group is dominated by one Python filter process. A compressed PE
+    group additionally starts two pigz readers, so launching one process per
+    CPU would oversubscribe the host. This keeps the direct samplesheet path
+    parallel without the old fixed ``threads // 3`` limit for plain FASTQ.
+    """
+    groups = list(groups or [])
+    if not groups:
+        return 1
+    has_gzip = any(
+        str(group.get(key, "")).lower().endswith(".gz")
+        for group in groups
+        for key in ("read1", "read2")
+        if group.get(key)
+    )
+    is_paired = any(group.get("read2") for group in groups)
+    worker_cost = 1
+    if has_gzip:
+        worker_cost += 2 if is_paired else 1
+    return max(1, min(len(groups), max(1, int(num_threads) // worker_cost)))
+
+
+def _config_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 
 def _clear_previous_filtering_outputs(runtime):
@@ -135,9 +187,12 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
         raise ValueError("No file1 found in YAML configuration.")
 
     fastq_groups = config.get("fastq_groups") or []
+    direct_group_jobs = _recommended_direct_group_jobs(fastq_groups, num_threads)
     direct_samplesheet_groups = (
         config.get("barcode_source") == "samplesheet_barcode"
-        and len(fastq_groups) >= max(2, max(1, num_threads // 3))
+        # Keep splitting for one-to-five large files; direct mode is intended
+        # for the many-small-FASTQ samplesheet layout.
+        and len(fastq_groups) >= min(6, max(2, direct_group_jobs))
     )
 
     total_size_bytes = 0
@@ -154,8 +209,10 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
         raise ValueError(f"Failed to estimate average line length for {first_fq}")
 
     total_lines_est = total_size_bytes / avg_line_len
-    planned_filter_jobs = max(1, max(1, num_threads) // 3)
-    split_parts = max(1, min(num_threads, planned_filter_jobs * 2))
+    # Keep two chunks queued per CPU so uneven FASTQ content does not leave
+    # workers idle near the end of filtering. Cap the file count to avoid
+    # excessive metadata overhead on shared filesystems.
+    split_parts = max(1, min(64, max(1, num_threads) * 2))
 
     lines_per_chunk = int(math.ceil(total_lines_est / split_parts))
     rem = lines_per_chunk % 4
@@ -171,7 +228,7 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
     if direct_samplesheet_groups:
         fastq_groups, direct_group_batches, batch_loads = _make_weighted_group_batches(
             fastq_groups,
-            max(1, num_threads // 3),
+            direct_group_jobs,
         )
         config["fastq_groups"] = fastq_groups
         persist_run_config(config, yaml_file)
@@ -200,33 +257,38 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
 
     with timer.section("Filtering: fqfilter chunks", f"chunks={len(chunk_suffixes)}"):
         processes = []
-        max_filter_jobs = max(1, min(len(chunk_suffixes), max(1, num_threads // 3)))
-        threads_per_filter = max(1, num_threads // max_filter_jobs)
-        fqfilter_pigz_threads = max(1, min(2, threads_per_filter))
+        # Normal split chunks are uncompressed, so each fqfilter child owns
+        # one main CPU and can be scheduled independently. Direct samplesheet
+        # groups may start pigz readers; one pigz thread per reader avoids
+        # oversubscription while keeping the Python filter workers busy.
+        max_filter_jobs = max(1, min(len(chunk_suffixes), max(1, num_threads)))
+        fqfilter_pigz_threads = 1
         log_info(
             "fqfilter parallel jobs: "
             f"{max_filter_jobs}; pigz threads/job: {fqfilter_pigz_threads}"
         )
 
-        def wait_for_filter_process(proc):
-            proc.wait()
-            if proc.returncode != 0:
-                raise RuntimeError(f"fqfilter failed (rc={proc.returncode}). Check {runtime.log_path} for details.")
-
         batch_by_suffix = {suffix: (start, end) for suffix, start, end in direct_group_batches}
-        for suffix in chunk_suffixes:
-            cmd = [python_exec, resolve_script("fqfilter.py"), yaml_file, pigz, suffix]
-            cmd.extend(["--pigz-threads", str(fqfilter_pigz_threads)])
-            if direct_samplesheet_groups:
-                start, end = batch_by_suffix[suffix]
-                cmd.extend(["--direct-fastq", "--group-start", str(start), "--group-end", str(end)])
+        try:
+            for suffix in chunk_suffixes:
+                cmd = [python_exec, resolve_script("fqfilter.py"), yaml_file, pigz, suffix]
+                cmd.extend(["--pigz-threads", str(fqfilter_pigz_threads)])
+                if direct_samplesheet_groups:
+                    start, end = batch_by_suffix[suffix]
+                    cmd.extend(["--direct-fastq", "--group-start", str(start), "--group-end", str(end)])
 
-            processes.append(subprocess.Popen(cmd, stdout=run_log, stderr=subprocess.STDOUT, env=exec_env))
-            if len(processes) >= max_filter_jobs:
-                wait_for_filter_process(processes.pop(0))
+                processes.append(subprocess.Popen(cmd, stdout=run_log, stderr=subprocess.STDOUT, env=exec_env))
+                if len(processes) >= max_filter_jobs:
+                    _wait_for_filter_slot(processes, runtime.log_path)
 
-        for proc in processes:
-            wait_for_filter_process(proc)
+            while processes:
+                _wait_for_filter_slot(processes, runtime.log_path)
+        finally:
+            for proc in processes:
+                if proc.poll() is None:
+                    proc.terminate()
+            for proc in processes:
+                proc.wait()
 
     log_info("Cleaning up temporary FASTQ chunks...")
     with timer.section("Filtering: cleanup FASTQ chunks"):
@@ -277,7 +339,10 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
     umi_chunks = []
     int_chunks = []
     if config.get("barcode_source") == "samplesheet_barcode" or os.path.exists(bc_bin_table):
-        stream_bc_correction = bool(config.get("performance_opts", {}).get("stream_bc_correction", True))
+        stream_bc_correction = _config_bool(
+            config.get("performance_opts", {}).get("stream_bc_correction"),
+            default=False,
+        )
         if stream_bc_correction:
             log_info("Using streaming BC correction during Mapping")
             with timer.section("Filtering: prepare raw BAM chunks for streaming correction", f"chunks={len(chunk_suffixes)}"):
@@ -293,42 +358,49 @@ def run_filtering_stage(runtime, timer, run_stage_cmd, run_log):
             log_info("Correcting BC Tags")
             with timer.section("Filtering: correct BC tags", f"chunks={len(chunk_suffixes)}"):
                 correct_processes = []
+                max_correct_jobs = max(1, min(len(chunk_suffixes), max(1, num_threads)))
+                try:
+                    for suffix in chunk_suffixes:
+                        raw_bam = os.path.join(tmp_merge_path, f"{project}{suffix}.raw.tagged.bam")
+                        fixed_bam_umi = os.path.join(tmp_merge_path, f"{project}{suffix}.filtered.tagged.umi.bam")
+                        fixed_bam_int = os.path.join(tmp_merge_path, f"{project}{suffix}.filtered.tagged.internal.bam")
 
-                for suffix in chunk_suffixes:
-                    raw_bam = os.path.join(tmp_merge_path, f"{project}{suffix}.raw.tagged.bam")
-                    fixed_bam_umi = os.path.join(tmp_merge_path, f"{project}{suffix}.filtered.tagged.umi.bam")
-                    fixed_bam_int = os.path.join(tmp_merge_path, f"{project}{suffix}.filtered.tagged.internal.bam")
+                        umi_chunks.append(fixed_bam_umi)
+                        int_chunks.append(fixed_bam_int)
 
-                    umi_chunks.append(fixed_bam_umi)
-                    int_chunks.append(fixed_bam_int)
+                        if os.path.exists(fixed_bam_umi):
+                            os.remove(fixed_bam_umi)
+                        if os.path.exists(fixed_bam_int):
+                            os.remove(fixed_bam_int)
 
-                    if os.path.exists(fixed_bam_umi):
-                        os.remove(fixed_bam_umi)
-                    if os.path.exists(fixed_bam_int):
-                        os.remove(fixed_bam_int)
+                        cmd_args = [
+                            python_exec,
+                            resolve_script("correct_BCtag.py"),
+                            raw_bam,
+                            fixed_bam_umi,
+                            fixed_bam_int,
+                            bc_bin_for_correction,
+                            expect_id_barcode_file,
+                        ]
+                        correct_processes.append(
+                            subprocess.Popen(
+                                cmd_args,
+                                stdout=run_log,
+                                stderr=subprocess.STDOUT,
+                                env=exec_env,
+                            )
+                        )
+                        if len(correct_processes) >= max_correct_jobs:
+                            _wait_for_process_slot(correct_processes, runtime.log_path, "correct_BCtag")
 
-                    cmd_args = [
-                        python_exec,
-                        resolve_script("correct_BCtag.py"),
-                        raw_bam,
-                        fixed_bam_umi,
-                        fixed_bam_int,
-                        bc_bin_for_correction,
-                        expect_id_barcode_file,
-                    ]
-                    correct_processes.append(subprocess.Popen(cmd_args, stdout=run_log, stderr=subprocess.STDOUT, env=exec_env))
-
-                for proc in correct_processes:
-                    proc.wait()
-                    if proc.returncode != 0:
-                        # Reap the remaining sibling processes before failing so
-                        # a single bad chunk does not leave orphaned correctors.
-                        for other in correct_processes:
-                            if other.poll() is None:
-                                other.terminate()
-                        for other in correct_processes:
-                            other.wait()
-                        raise RuntimeError(f"correct_BCtag failed (rc={proc.returncode}). Check {runtime.log_path} for details.")
+                    while correct_processes:
+                        _wait_for_process_slot(correct_processes, runtime.log_path, "correct_BCtag")
+                finally:
+                    for proc in correct_processes:
+                        if proc.poll() is None:
+                            proc.terminate()
+                    for proc in correct_processes:
+                        proc.wait()
 
                 for suffix in chunk_suffixes:
                     raw_bam = os.path.join(tmp_merge_path, f"{project}{suffix}.raw.tagged.bam")

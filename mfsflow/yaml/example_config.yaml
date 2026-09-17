@@ -86,7 +86,8 @@ counting_opts:
 
 #Runtime resource and temporary-file options
 performance_opts:
-  stream_bc_correction: yes
+  stream_bc_correction: no
+  parallel_counting_postprocess: yes
   tmp_root: ~
   tool_cache: ~ # Optional writable cache for bundled tools whose execute bit was lost.
   min_free_gb: 5
